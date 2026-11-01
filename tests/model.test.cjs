@@ -209,7 +209,7 @@ test('rows carry a scannable lead, tone and exposure instead of a text blob', ()
     const lan = {...port(9000, '192.168.1.5'), exposure:'lan'};
     const rows = M.rows({ports:[port(), exposed, lan]}, 'Localhost', '', 'all', M.config({}));
     assert.deepEqual(clone(rows.map(r => [r.lead, r.badge, r.tone])),
-        [['3000','local','dim'], ['8080','exposed','urgent'], ['9000','lan','warn']]);
+        [['3000','local','info'], ['8080','exposed','urgent'], ['9000','lan','warn']]);
     assert.equal(rows[0].title, 'vite');
     assert.match(rows[0].subtitle, /127\.0\.0\.1/);
     assert.equal(M.rows({ports:[port(), exposed, lan]}, 'Localhost', '', 'lan', M.config({})).length, 2);
@@ -221,7 +221,7 @@ test('rows carry a scannable lead, tone and exposure instead of a text blob', ()
     const images = M.rows({images:[{id:'sha256:'+'c'.repeat(64),tags:['<none>:<none>'],used:false,size:'1MB'}],
         volumes:[{id:'volume:data',name:'data',containers:['db'],destinations:['/var/lib'],mountpoint:'/x'}]}, 'Images', '', 'all', M.config({}));
     // Images come before volumes, whose generated names would otherwise crowd the top.
-    assert.deepEqual(clone(images.map(r => [r.title, r.badge])), [['untagged','unused'], ['data','attached']]);
+    assert.deepEqual(clone(images.map(r => [r.title, r.badge, r.tone])), [['untagged','unused','dim'], ['data','attached','info']]);
 });
 
 test('facts describe each kind without unknown noise and stay copyable', () => {
@@ -313,4 +313,14 @@ test('zoned wildcard binds still open on loopback', () => {
 test('a collector that never started says so instead of quoting an exit code', () => {
     assert.match(M.outcome('ports', undefined, -1, false).error, /could not start/);
     assert.match(M.outcome('ports', '', 2, false).error, /exit 2/);
+});
+
+test('badge colours come from the theme palette with readable fallbacks', () => {
+    const toml = 'accent = "#e74444"\ncolor1 = "#ef5d67"\ncolor2 = "#8edb73"\ncolor3 = \'#f7c553\'\ncolor4 = "#7ca5ff"\n';
+    assert.deepEqual(clone(M.palette(toml)), {red:'#ef5d67', green:'#8edb73', yellow:'#f7c553', blue:'#7ca5ff'});
+    const fallback = clone(M.palette(''));
+    assert.deepEqual(Object.keys(fallback), ['red', 'green', 'yellow', 'blue']);
+    assert.ok(Object.values(fallback).every(c => /^#[0-9a-f]{6}$/i.test(c)));
+    assert.equal(M.palette('red = "#ff0000"\ncolor1 = "bad"').red, '#ff0000');
+    assert.equal(M.palette(undefined).blue, fallback.blue);
 });

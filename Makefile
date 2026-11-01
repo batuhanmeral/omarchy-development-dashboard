@@ -28,5 +28,5 @@ check: check-fast qml-check
 fix:
 	ruff format .
 	ruff check --fix .
-	$(QML_BIN)/qmlformat -i *.qml tests/qml/*.qml tests/qml/imports/qs/*/*.qml
+	$(QML_BIN)/qmlformat -i *.qml tests/qml/*.qml tests/qml/imports/*/*/*.qml
 

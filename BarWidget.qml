@@ -1,40 +1,38 @@
 import QtQuick
 import Quickshell.Io
+import qs.Commons
 import qs.Ui as Ui
 import "Model.js" as Model
 
+// Bar button plus the data side of the plugin. One collector process runs at a time; the panel
+// (Panel.qml) only renders what this item holds.
 Ui.BarWidget {
     id: root
-    readonly property var panel: panelLoader.item
-    readonly property var hostBar: bar
     moduleName: "io.github.batuhanmeral.devports"
 
+    readonly property var panel: panelLoader.item
+    readonly property var hostBar: bar
     readonly property var cfg: Model.config(settings)
+    readonly property alias logs: logState
     property var inventory: ({})
     property var errors: ({})
     property var lastPoll: ({})
-    property var lastSuccess: ({})
+    property double lastUpdate: 0
     property string message: ""
-    readonly property string logText: logs.text
-    property int requestLogToken: 0
-    property bool busy: false
-    property bool timedOut: false
-    property bool received: false
-    property string requestScope: ""
+    property bool messageUrgent: false
+    // The running collector: { scope, generation, logToken, raw, exitCode, exited, streamed, timedOut }.
+    property var job: null
+    property var pendingLogs: null
     property int generation: 0
-    property int requestGeneration: 0
+    property bool refreshing: false
     property string actionName: ""
+    readonly property bool busy: job !== null
     readonly property bool opened: panelLoader.item ? panel.opened === true : false
     readonly property bool popoutSwitchClosing: panelLoader.item ? panel.popoutSwitchClosing === true : false
-    readonly property int serviceCount: Model.rows(inventory, "Localhost", "", "all", cfg).length
-    readonly property bool hasError: Object.keys(errors).some(function (key) {
-        return !!root.errors[key];
-    })
-    readonly property string errorText: Object.keys(errors).filter(function (key) {
-        return !!root.errors[key];
-    }).map(function (key) {
-        return key + ": " + root.errors[key];
-    }).join("\n")
+    readonly property var counts: Model.counts(inventory, cfg)
+    readonly property int serviceCount: counts.Localhost
+    readonly property string errorText: Model.barError(errors)
+    readonly property bool hasError: errorText !== ""
     readonly property string backendPath: decodeURIComponent(String(Qt.resolvedUrl("backend/collector.py")).replace(/^file:\/\//, ""))
 
     function open() {
@@ -63,41 +61,59 @@ Ui.BarWidget {
     }
 
     function setError(scope, value) {
+        if ((errors[scope] || "") === value)
+            return;
         var updated = Object.assign({}, errors);
         updated[scope] = value;
         errors = updated;
     }
 
-    function poll() {
-        var scope = Model.nextScope(Date.now(), opened, cfg, lastPoll, busy || worker.running);
-        if (scope)
-            request(scope, "");
+    function notify(text, urgent) {
+        message = text;
+        messageUrgent = urgent === true;
+        if (text)
+            messageTimer.restart();
     }
 
-    function refresh() {
-        if (busy || worker.running) {
-            message = "A refresh is already running.";
+    function poll() {
+        if (job)
+            return;
+        var queued = pendingLogs;
+        pendingLogs = null;
+        if (queued && queued.token === logState.generation && opened && cfg.dockerEnabled) {
+            start("logs", queued);
             return;
         }
+        var scope = Model.nextScope(Date.now(), opened, cfg, lastPoll, false);
+        if (scope)
+            start(scope, null);
+        else
+            refreshing = false;
+    }
+
+    // Re-queries every scope, one after another, as soon as the worker is free.
+    function refresh() {
         lastPoll = {};
-        message = "";
+        refreshing = true;
+        poll();
+    }
+
+    function requestLogs(containerId) {
+        if (!opened || !cfg.dockerEnabled || !/^[a-f0-9]{64}$/.test(containerId))
+            return;
+        pendingLogs = {
+            id: containerId,
+            token: logState.begin(containerId)
+        };
         poll();
     }
 
     function clearLogs() {
-        logs.clear();
-        setError("logs", "");
+        pendingLogs = null;
+        logState.clear();
     }
 
-    function currentRequest() {
-        return requestGeneration === generation && (requestScope !== "logs" || requestLogToken === logs.generation);
-    }
-
-    function request(scope, containerId) {
-        if (busy || worker.running)
-            return;
-        if (scope === "logs" && (!opened || !cfg.dockerEnabled || !/^[a-f0-9]{64}$/.test(containerId)))
-            return;
+    function start(scope, logRequest) {
         var args = ["python3", backendPath, scope];
         if (!cfg.dockerEnabled)
             args.push("--no-docker");
@@ -105,102 +121,110 @@ Ui.BarWidget {
             cfg.sqliteFiles.split("\n").filter(function (path) {
                 return path.trim();
             }).forEach(function (path) {
-                args.push("--sqlite-file", path.trim());
+                args.push("--sqlite-file=" + path.trim());
             });
-        if (scope === "logs") {
-            args.push("--container-id", containerId);
-            requestLogToken = logs.begin(containerId);
-        }
-        requestScope = scope;
-        requestGeneration = generation;
-        timedOut = false;
-        received = false;
-        busy = true;
-        lastPoll = Object.assign({}, lastPoll, {
-            [scope]: Date.now()
-        });
+        if (logRequest)
+            args.push("--container-id", logRequest.id);
+        job = {
+            scope: scope,
+            generation: generation,
+            logToken: logRequest ? logRequest.token : 0,
+            raw: undefined,
+            exitCode: -1,
+            exited: false,
+            streamed: false,
+            timedOut: false
+        };
+        if (!logRequest)
+            lastPoll = Object.assign({}, lastPoll, {
+                [scope]: Date.now()
+            });
         worker.command = args;
         watchdog.restart();
         worker.running = true;
     }
 
-    function consume(raw) {
-        received = true;
-        if (timedOut || !currentRequest())
+    // Process exit and the end of its stdout arrive in no guaranteed order; a job is settled once
+    // both are in, so a result is never decoded against the scope of the next request.
+    function finish() {
+        var done = job;
+        if (!done)
             return;
-        try {
-            let result = Model.decode(raw, requestScope);
-            if (requestScope === "logs") {
-                if (!logs.accept(requestLogToken, result))
-                    return;
+        job = null;
+        watchdog.stop();
+        forceStop.stop();
+        drain.stop();
+        var outcome = Model.outcome(done.scope, done.raw, done.exitCode, done.timedOut);
+        if (Model.current(done, generation, logState.generation)) {
+            if (done.scope === "logs") {
+                if (outcome.result)
+                    logState.accept(done.logToken, outcome.result);
+                else
+                    logState.fail(done.logToken, outcome.error);
             } else {
-                inventory = Model.merge(inventory, result.data);
+                if (outcome.result)
+                    inventory = Model.absorb(inventory, outcome.result.data);
+                setError(done.scope, outcome.error);
+                if (done.scope === "ports" && outcome.result && outcome.result.ok)
+                    lastUpdate = Date.now();
             }
-            setError(requestScope, result.errors.join("\n"));
-            if (result.ok)
-                lastSuccess = Object.assign({}, lastSuccess, {
-                    [requestScope]: Date.now()
-                });
-        } catch (error) {
-            setError(requestScope, "Invalid collector response: " + error.message);
         }
+        Qt.callLater(poll);
     }
 
     function saveSettings(values) {
         var problems = Model.validateSettings(values);
         if (problems.length) {
-            message = problems.join("\n");
+            notify(problems.join("\n"), true);
             return false;
         }
         if (!bar || !hostBar.shell || typeof hostBar.shell.updateEntryInline !== "function") {
-            message = "This bar does not expose persistent plugin settings.";
+            notify("This bar cannot store plugin settings.", true);
             return false;
         }
         var entry = Object.assign({}, root.settings, values, {
             id: moduleName
         });
-        if (JSON.stringify(entry) === JSON.stringify(root.settings)) {
-            message = "Settings unchanged.";
+        if (JSON.stringify(entry) === JSON.stringify(root.settings))
             return true;
-        }
         if (hostBar.shell.updateEntryInline(moduleName, entry) === false) {
-            message = "Settings could not be saved by the shell.";
+            notify("The shell could not save these settings.", true);
             return false;
         }
         root.settings = entry;
-        message = "Settings saved.";
+        notify("Settings saved.", false);
         return true;
     }
 
-    function copyText(value) {
-        if (!value || action.running)
+    function run(name, command) {
+        if (action.running)
             return;
-        actionName = "Copy";
-        action.command = ["wl-copy", "--type", "text/plain", "--", value];
+        actionName = name;
+        action.command = command;
         actionWatchdog.restart();
         action.running = true;
+    }
+
+    function copyText(value) {
+        if (value)
+            run("Copy", ["wl-copy", "--type", "text/plain", "--", value]);
     }
 
     function openUrl(row, scheme) {
         var target = Model.url(row, scheme);
-        if (!target || action.running)
-            return;
-        actionName = "Open URL";
-        action.command = ["xdg-open", target];
-        actionWatchdog.restart();
-        action.running = true;
+        if (target)
+            run("Open", ["xdg-open", target]);
     }
 
     onBarChanged: injectPanel()
     onSettingsChanged: {
+        // Runs while `cfg` may still be unevaluated, so derive the new configuration here.
+        var next = Model.config(settings);
         generation++;
         clearLogs();
         lastPoll = {};
-        if (!cfg.dockerEnabled) {
-            inventory = Model.merge(inventory, {
-                containers: [],
-                images: [],
-                volumes: [],
+        if (!next.dockerEnabled) {
+            inventory = Model.absorb(inventory, {
                 dockerStatus: "disabled"
             });
             setError("docker", "");
@@ -224,7 +248,7 @@ Ui.BarWidget {
     implicitHeight: button.implicitHeight
 
     LogState {
-        id: logs
+        id: logState
     }
 
     Timer {
@@ -234,17 +258,23 @@ Ui.BarWidget {
         onTriggered: root.poll()
     }
     Timer {
+        id: messageTimer
+        interval: 4000
+        onTriggered: root.message = ""
+    }
+    Timer {
         id: watchdog
         interval: 15000
         onTriggered: {
-            root.timedOut = true;
-            if (root.currentRequest())
-                root.setError(root.requestScope, "Collector timeout; previous data may be stale.");
+            if (!root.job)
+                return;
+            root.job.timedOut = true;
             if (worker.running) {
                 worker.running = false;
                 forceStop.restart();
-            } else
-                root.busy = false;
+            } else {
+                root.finish();
+            }
         }
     }
     Timer {
@@ -254,21 +284,43 @@ Ui.BarWidget {
             if (worker.running)
                 worker.signal(9);
             else
-                root.busy = false;
+                root.finish();
         }
+    }
+    // A process that never started produces an exit without a stream end.
+    Timer {
+        id: drain
+        interval: 300
+        onTriggered: root.finish()
     }
     Process {
         id: worker
+        objectName: "collector"
         stdout: StdioCollector {
-            onStreamFinished: root.consume(text)
+            onStreamFinished: {
+                if (!root.job)
+                    return;
+                root.job.raw = text;
+                root.job.streamed = true;
+                if (root.job.exited)
+                    root.finish();
+            }
         }
         stderr: StdioCollector {}
+        // Quickshell clears `running` without an exit signal when the program cannot start.
+        onRunningChanged: {
+            if (!running && root.job && !root.job.exited)
+                drain.restart();
+        }
         onExited: function (exitCode, exitStatus) {
-            watchdog.stop();
-            forceStop.stop();
-            if (!root.timedOut && root.currentRequest() && (!root.received || (exitCode !== 0 && !root.errors[root.requestScope])))
-                root.setError(root.requestScope, "Collector failed (exit " + exitCode + ").");
-            root.busy = false;
+            if (!root.job)
+                return;
+            root.job.exitCode = exitCode;
+            root.job.exited = true;
+            if (root.job.streamed)
+                root.finish();
+            else
+                drain.restart();
         }
     }
     Timer {
@@ -277,16 +329,20 @@ Ui.BarWidget {
         onTriggered: {
             if (action.running)
                 action.signal(9);
-            root.message = root.actionName + " timed out or could not start.";
+            root.notify(root.actionName + " timed out.", true);
         }
     }
     Process {
         id: action
+        objectName: "action"
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: function (exitCode, exitStatus) {
             actionWatchdog.stop();
-            root.message = exitCode === 0 ? root.actionName + " completed." : root.actionName + " failed; check the required tool is available.";
+            if (exitCode === 0)
+                root.notify(root.actionName === "Copy" ? "Copied to clipboard." : "Opened in browser.", false);
+            else
+                root.notify(root.actionName + " failed. Is " + (root.actionName === "Copy" ? "wl-copy" : "xdg-open") + " installed?", true);
         }
     }
     Loader {
@@ -299,17 +355,17 @@ Ui.BarWidget {
             Qt.callLater(root.injectPanel);
         }
     }
-    Ui.WidgetButton {
+    Ui.BarIconButton {
         id: button
         anchors.fill: parent
         bar: root.bar
-        text: ">_ " + (root.errors.ports ? "?" : root.serviceCount) + (root.hasError ? " !" : "")
+        text: Model.icon
         active: root.hasError
-        tooltipText: "Development Ports · " + root.serviceCount + " endpoints" + (root.hasError ? "\n" + root.errorText : "")
+        tooltipText: root.hasError ? "Development Ports\n" + root.errorText : "Development Ports · " + Model.summary(root.inventory, root.cfg)
         onPressed: function (buttonCode) {
             if (buttonCode === Qt.LeftButton)
                 root.toggle();
-            else if (buttonCode === Qt.RightButton)
+            else
                 root.refresh();
         }
     }

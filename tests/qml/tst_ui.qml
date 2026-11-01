@@ -90,6 +90,7 @@ TestCase {
             id: "tcp:127.0.0.1:3000",
             address: "127.0.0.1",
             port: 3000,
+            exposure: "localhost",
             containerIds: [],
             process: "vite",
             protocol: "http",
@@ -101,16 +102,35 @@ TestCase {
         Model.sync(entries, output);
         compare(entries.count, 1);
         compare(entries.get(0).title, "vite");
+        compare(entries.get(0).lead, "3000");
+        compare(entries.get(0).tone, "info");
         compare(entries.get(0).rowState, "running");
         Model.sync(entries, []);
         compare(entries.count, 0);
     }
+    function test_logFailuresReplaceLoadingAndStaleFailuresAreDropped() {
+        const logs = createLogs();
+        const stale = logs.begin("a".repeat(64));
+        verify(logs.loading);
+        const token = logs.begin("b".repeat(64));
+        verify(!logs.fail(stale, "Collector timed out"));
+        verify(logs.loading);
+        verify(logs.fail(token, "Collector timed out"));
+        verify(!logs.loading);
+        verify(logs.failed);
+        compare(logs.text, "Collector timed out");
+        logs.clear();
+        verify(!logs.failed);
+        compare(logs.text, "");
+    }
     function test_settingsRoundTrip() {
         const form = createTemporaryObject(settingsComponent, suite);
         verify(form !== null);
-        verify(form.popupColors !== undefined, "Host theme colors must resolve");
         saved.target = form;
         form.load();
+        compare(form.dockerEnabled, false);
+        compare(form.compact, false);
+        compare(form.tabs.join(","), "Localhost,Docker");
         form.submit();
         compare(saved.count, 1);
         const value = saved.signalArguments[0][0];
@@ -120,6 +140,53 @@ TestCase {
         compare(value.visibleTabs, "Localhost,Docker");
         compare(value.sqliteFiles, "/work/app.db");
         compare(value.compact, false);
+        compare(value.exposure, "all");
+        compare(value.sortBy, "port");
+        saved.clear();
+    }
+    function test_settingsEditsAreSubmittedInTabOrder() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        saved.target = form;
+        form.toggleTab("Databases");
+        form.toggleTab("Localhost");
+        form.dockerEnabled = true;
+        form.sortBy = "name";
+        form.exposure = "lan";
+        form.submit();
+        compare(saved.count, 1);
+        const value = saved.signalArguments[0][0];
+        compare(value.visibleTabs, "Docker,Databases");
+        compare(value.dockerEnabled, true);
+        compare(value.sortBy, "name");
+        compare(value.exposure, "lan");
+        saved.clear();
+    }
+    function test_settingsRejectInvalidDraftsWithoutSaving() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        saved.target = form;
+        form.toggleTab("Localhost");
+        form.toggleTab("Docker");
+        form.submit();
+        compare(saved.count, 0);
+        verify(form.validationError.indexOf("tab") >= 0);
+        form.load();
+        compare(form.validationError, "");
+        compare(form.tabs.join(","), "Localhost,Docker");
+        saved.clear();
+    }
+    function test_typedIntervalIsSavedWithoutLeavingTheField() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        saved.target = form;
+        const field = findChild(form, "refreshInterval").field;
+        field.contentItem.text = "30";
+        form.submit();
+        compare(saved.count, 1);
+        compare(saved.signalArguments[0][0].refreshInterval, 30);
+        saved.clear();
+        field.contentItem.text = "999";
+        form.submit();
+        compare(saved.count, 0);
+        verify(form.validationError.indexOf("2 to 120") >= 0);
         saved.clear();
     }
 }

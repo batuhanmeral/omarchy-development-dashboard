@@ -232,7 +232,7 @@ function viewRow(row, kind) {
             .filter(known).join(" · ");
         view.exposure = row.exposure || "";
         view.badge = row.exposure === "localhost" ? "local" : row.exposure === "all" ? "exposed" : "lan";
-        view.tone = row.exposure === "localhost" ? "dim" : row.exposure === "all" ? "urgent" : "warn";
+        view.tone = row.exposure === "localhost" ? "info" : row.exposure === "all" ? "urgent" : "warn";
         view.url = url(row);
         view.copyText = view.url || address;
         view.containerId = (row.containerIds || [])[0] || "";
@@ -259,7 +259,7 @@ function viewRow(row, kind) {
         view.title = text(row.name);
         view.subtitle = users.length ? users.join(", ") : "Not used by any container";
         view.badge = users.length ? "attached" : "unattached";
-        view.tone = users.length ? "ok" : "dim";
+        view.tone = users.length ? "info" : "dim";
         view.copyText = text(row.name);
         words = [row.mountpoint].concat(row.destinations || []);
     } else {
@@ -402,6 +402,22 @@ function dockerNotice(state, errors, cfg) {
     var reason = (errors || {}).docker || (errors || {}).assets || "";
     if ((state || {}).dockerStatus === "unavailable") return "Docker is not reachable: " + (reason || "unknown reason");
     return reason;
+}
+
+// The bar and panel glyph (Nerd Font). Kept in one place so both stay the same.
+var icon = "\u{f0200}"; // nf-md-ethernet
+
+// Status colours from the theme's colors.toml (red/green/yellow/blue = color1..4), so badges
+// follow the active Omarchy theme. Fallbacks are mid-tone hues readable on light and dark.
+function palette(toml) {
+    var output = { red: "#e5534b", green: "#57ab5a", yellow: "#c69026", blue: "#539bf5" };
+    var keys = { color1: "red", red: "red", color2: "green", green: "green",
+        color3: "yellow", yellow: "yellow", color4: "blue", blue: "blue" };
+    String(toml || "").split("\n").forEach(function (line) {
+        var match = line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*["']?(#[0-9A-Fa-f]{6})["']?\s*$/);
+        if (match && keys[match[1]]) output[keys[match[1]]] = match[2];
+    });
+    return output;
 }
 
 function tabLabel(tab) {
