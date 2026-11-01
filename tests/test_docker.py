@@ -189,6 +189,47 @@ class DockerTests(unittest.TestCase):
             c.read_logs("a;rm", DockerRunner())
         self.assertEqual(c.read_logs(CID, DockerRunner())["text"], "ready\n")
 
+    def test_log_timestamps_are_short_local_times(self):
+        class Stamped(DockerRunner):
+            def run(self, argv, **kwargs):
+                if "logs" in argv:
+                    return (
+                        "2026-11-16T21:32:03.190517987Z LOG: ready\n"
+                        "continuation without a timestamp\n"
+                        "2026-11-16T23:59:59Z done\n"
+                    )
+                return super().run(argv, **kwargs)
+
+        with patch.dict(os.environ, {"TZ": "Europe/Istanbul"}):
+            c.time.tzset()
+            try:
+                text = c.read_logs(CID, Stamped())["text"]
+            finally:
+                os.environ.pop("TZ", None)
+                c.time.tzset()
+        self.assertEqual(
+            text,
+            "11-17 00:32:03  LOG: ready\ncontinuation without a timestamp\n11-17 02:59:59  done\n",
+        )
+
+    def test_out_of_range_log_timestamps_are_left_unchanged(self):
+        class Edge(DockerRunner):
+            def run(self, argv, **kwargs):
+                if "logs" in argv:
+                    return "0001-01-01T00:00:00Z zero\n9999-12-31T23:59:59Z end\n"
+                return super().run(argv, **kwargs)
+
+        for zone in ("America/New_York", "Asia/Tokyo"):
+            with patch.dict(os.environ, {"TZ": zone}):
+                c.time.tzset()
+                try:
+                    text = c.read_logs(CID, Edge())["text"]
+                finally:
+                    os.environ.pop("TZ", None)
+                    c.time.tzset()
+            self.assertIn("zero", text)
+            self.assertIn("end", text)
+
     def test_cli_one_json_object_and_stderr_diagnostics(self):
         out, err = io.StringIO(), io.StringIO()
         with (

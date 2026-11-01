@@ -61,13 +61,18 @@ function validateSettings(raw) {
     return errors;
 }
 
+function validIpv4(address) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(address)
+        && address.split(".").every(function (n) { return Number(n) <= 255; });
+}
+
 function validAddress(address) {
     if (typeof address !== "string" || address.length > 128) return false;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) {
-        return address.split(".").every(function (n) { return Number(n) <= 255; });
-    }
+    // ss reports interface-scoped IPv4 listeners too, e.g. systemd-resolved on 127.0.0.53%lo.
+    var v4 = address.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:%[a-zA-Z0-9_.-]+)?$/);
+    if (v4) return validIpv4(v4[1]);
     var mixed = address.match(/^[0-9a-fA-F:]+:(\d{1,3}(?:\.\d{1,3}){3})(?:%[a-zA-Z0-9_.-]+)?$/);
-    if (mixed) return validAddress(mixed[1]);
+    if (mixed) return validIpv4(mixed[1]);
     // IPv6 syntax is checked fully in Python; this UI boundary also excludes URL delimiters.
     return address.indexOf(":") >= 0 && /^[0-9a-fA-F:]+(?:%[a-zA-Z0-9_.-]+)?$/.test(address);
 }
@@ -88,7 +93,8 @@ function decode(raw, expected) {
     if (result.errors.length > 32 || result.errors.some(function (e) { return typeof e !== "string"; }))
         throw new Error("Invalid collector diagnostics.");
     if (expected === "logs") {
-        if (result.ok && (typeof result.data.text !== "string" || result.data.text.length > 32768))
+        // Python caps logs at 32768 code points; astral characters count twice in UTF-16.
+        if (result.ok && (typeof result.data.text !== "string" || result.data.text.length > 65536))
             throw new Error("Invalid log response.");
         return result;
     }
@@ -132,6 +138,14 @@ function merge(current, data) {
     return next;
 }
 
+// Docker sections describe the daemon as of the last successful query. Once it is unreachable or
+// switched off they are unknown, so they are emptied rather than shown as if still current.
+function absorb(current, data) {
+    if (data.dockerStatus === "unavailable" || data.dockerStatus === "disabled")
+        data = { dockerStatus: data.dockerStatus, containers: [], images: [], volumes: [] };
+    return merge(current, data);
+}
+
 function listeners(state, includeDocker) {
     var byId = Object.create(null);
     (state.ports || []).forEach(function (row) {
@@ -166,8 +180,11 @@ function url(row, scheme) {
     var protocol = scheme || row.protocol;
     if (!validPort(row) || row.database || ["http", "https"].indexOf(protocol) < 0) return "";
     var host = row.address;
-    if (host === "0.0.0.0") host = "127.0.0.1";
-    if (host === "::") host = "::1";
+    var bare = host.split("%")[0];
+    // A wildcard bind is reached on loopback, without the interface zone.
+    if (bare === "0.0.0.0") host = "127.0.0.1";
+    else if (bare === "::") host = "::1";
+    else if (host.indexOf(":") < 0) host = bare;
     if (host.indexOf(":") >= 0) host = "[" + host.replace(/%/g, "%25") + "]";
     return protocol + "://" + host + ":" + row.port + "/";
 }
@@ -178,51 +195,146 @@ function hidden(row, cfg) {
         || (cfg.exposure === "lan" && row.exposure === "localhost");
 }
 
+function duration(seconds) {
+    var s = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+    return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+}
+
+function known(value) {
+    return value !== undefined && value !== null && value !== "" && value !== "Unknown";
+}
+
+function imageTags(row) {
+    var tags = (row.tags || []).filter(function (tag) { return tag.indexOf("<none>") < 0; });
+    return tags.length ? tags.join(", ") : "untagged";
+}
+
+function containerTone(row) {
+    if (row.health === "unhealthy" || row.state === "dead") return "urgent";
+    if (row.state !== "running") return row.state === "restarting" || row.state === "paused" ? "warn" : "dim";
+    return row.health === "starting" ? "warn" : "ok";
+}
+
+// One list row. Every field is a primitive so it can live in a QML ListModel.
 function viewRow(row, kind) {
-    var title, subtitle, badge, detail, link = "", copy = "", containerId = "";
+    var view = { id: row.id, kind: kind, lead: "", title: "", subtitle: "", badge: "", tone: "dim",
+        rowState: row.state || "", exposure: "", url: "", copyText: "", containerId: "", port: row.port || 0 };
+    var words = [];
     if (kind === "port") {
-        title = row.database || row.containerName || row.process || "Unknown";
-        subtitle = addressText(row);
-        badge = row.exposure;
-        link = url(row);
-        copy = link || subtitle;
-        containerId = (row.containerIds || [])[0] || "";
-        detail = "Bind: " + subtitle + "\nExposure: " + text(row.exposure)
-            + "\nProcess: " + text(row.process) + "\nPID: " + text(row.pid)
-            + "\nOwner: " + text(row.owner) + "\nWorking directory: " + text(row.cwd)
-            + "\nUptime: " + (row.uptimeSeconds == null ? "Unknown" : row.uptimeSeconds + " s")
-            + "\nContainer: " + text(row.containerName) + "\nProtocol: " + text(row.protocol);
+        var address = addressText(row);
+        view.lead = String(row.port);
+        view.title = row.containerName || (known(row.process) ? row.process : row.database || "Unknown process");
+        view.subtitle = [row.address, row.database, row.containerName ? "container"
+            : row.pid ? "pid " + row.pid : null, row.containerName || !known(row.owner) ? null : row.owner]
+            .filter(known).join(" · ");
+        view.exposure = row.exposure || "";
+        view.badge = row.exposure === "localhost" ? "local" : row.exposure === "all" ? "exposed" : "lan";
+        view.tone = row.exposure === "localhost" ? "dim" : row.exposure === "all" ? "urgent" : "warn";
+        view.url = url(row);
+        view.copyText = view.url || address;
+        view.containerId = (row.containerIds || [])[0] || "";
+        words = [address, row.process, row.cwd];
     } else if (kind === "container") {
-        title = row.name;
-        subtitle = row.image;
-        badge = row.health || row.state;
-        containerId = row.id;
-        detail = "Container: " + text(row.name) + "\nID: " + row.id + "\nImage: " + text(row.image)
-            + "\nState: " + text(row.state) + "\nHealth: " + text(row.health)
-            + "\nCPU: " + text(row.cpu) + "\nMemory: " + text(row.memory)
-            + "\nRestart policy: " + text(row.restart) + "\nCompose project: " + text(row.compose)
-            + "\nPublished TCP: " + ((row.publishedPorts || []).map(addressText).join(", ") || "None");
+        var published = (row.publishedPorts || []).map(function (p) { return ":" + p.port; })
+            .filter(function (p, i, all) { return all.indexOf(p) === i; });
+        view.title = text(row.name);
+        view.subtitle = [row.image, row.compose].concat(published).filter(known).join(" · ");
+        view.badge = row.health || row.state || "unknown";
+        view.tone = containerTone(row);
+        view.copyText = text(row.name);
+        view.containerId = row.id;
+        words = [row.id, row.database];
     } else if (kind === "image") {
-        title = (row.tags || []).join(", ");
-        subtitle = row.size || "Unknown size";
-        badge = row.used ? "in use" : "unused";
-        detail = "Tags: " + title + "\nID: " + row.id + "\nSize: " + subtitle + "\nUsage: " + badge;
+        view.title = imageTags(row);
+        view.subtitle = row.size || "Unknown size";
+        view.badge = row.used ? "in use" : "unused";
+        view.tone = row.used ? "ok" : "dim";
+        view.copyText = view.title === "untagged" ? row.id : view.title.split(", ")[0];
+        words = [row.id];
     } else if (kind === "volume") {
-        title = row.name;
-        subtitle = (row.containers || []).join(", ") || "Unattached";
-        badge = "volume";
-        detail = "Volume: " + title + "\nContainers: " + subtitle + "\nHost mount: " + text(row.mountpoint)
-            + "\nContainer mounts: " + (row.destinations || []).join(", ") + "\nSize: Unknown (not estimated)";
+        var users = row.containers || [];
+        view.title = text(row.name);
+        view.subtitle = users.length ? users.join(", ") : "Not used by any container";
+        view.badge = users.length ? "attached" : "unattached";
+        view.tone = users.length ? "ok" : "dim";
+        view.copyText = text(row.name);
+        words = [row.mountpoint].concat(row.destinations || []);
     } else {
-        title = row.name;
-        subtitle = row.path;
-        badge = row.state;
-        detail = "SQLite: " + subtitle + "\nState: " + badge + "\nFile contents are never read.";
+        view.title = text(row.name);
+        view.subtitle = text(row.path);
+        view.badge = row.state === "configured" ? "found" : "missing";
+        view.tone = row.state === "configured" ? "ok" : "urgent";
+        view.copyText = text(row.path);
+        words = ["sqlite"];
     }
-    return { id: row.id, title: text(title), subtitle: text(subtitle), badge: text(badge),
-        state: row.state || "", rowState: row.state || "", kind: kind, detail: detail, url: link, copyText: copy,
-        containerId: containerId, port: row.port || 0,
-        raw: JSON.stringify(row) };
+    view.haystack = [view.lead, view.title, view.subtitle, view.badge].concat(words)
+        .filter(known).join(" ").toLowerCase();
+    view.raw = JSON.stringify(row);
+    return view;
+}
+
+// Label/value pairs for the detail view. Unknown values are left out instead of printed.
+function facts(view, now) {
+    var row;
+    try { row = JSON.parse(view.raw); } catch (error) { return []; }
+    if (!plain(row)) return [];
+    var output = [];
+    function add(label, value, copy) {
+        if (!known(value)) return;
+        output.push({ label: label, value: String(value), copy: String(copy === undefined ? value : copy) });
+    }
+    if (view.kind === "port") {
+        add("Address", addressText(row));
+        add("Exposure", { localhost: "This machine only", lan: "Reachable on one network address",
+            all: "Reachable on every network interface" }[row.exposure]);
+        add("Process", known(row.process) ? row.process + (row.pid ? " (pid " + row.pid + ")" : "")
+            : "Not visible; owned by another user", known(row.process) ? row.process : "");
+        add("Owner", row.owner);
+        add("Working directory", row.cwd);
+        if (row.startedAt) add("Running for", duration(now - row.startedAt));
+        add("Container", row.containerName);
+        add("Database", row.database);
+        add("Container port", row.targetPort);
+    } else if (view.kind === "container") {
+        add("Name", row.name);
+        add("Image", row.image);
+        add("State", row.health ? row.state + " (" + row.health + ")" : row.state);
+        add("CPU", row.cpu);
+        add("Memory", row.memory);
+        add("Restart policy", row.restart);
+        add("Compose project", row.compose);
+        add("Published", (row.publishedPorts || []).map(addressText).join(", "));
+        add("Database", row.database);
+        add("ID", String(row.id).slice(0, 12), row.id);
+    } else if (view.kind === "image") {
+        add("Tags", imageTags(row));
+        add("Size", row.size);
+        add("Usage", row.used ? "Used by a container" : "Not used by any container");
+        add("ID", String(row.id).slice(0, 19), row.id);
+    } else if (view.kind === "volume") {
+        add("Name", row.name);
+        add("Used by", (row.containers || []).join(", "));
+        add("Mounted at", (row.destinations || []).join(", "));
+        add("Host path", row.mountpoint);
+    } else {
+        add("File", row.name);
+        add("Path", row.path);
+        add("Status", row.state === "configured" ? "File found" : "File not found");
+        add("Privacy", "Contents are never read", "");
+    }
+    return output;
+}
+
+function filters(tab) {
+    if (tab === "Localhost") return [{ value: "all", label: "All" }, { value: "localhost", label: "Local" },
+        { value: "lan", label: "Exposed" }];
+    if (tab === "Images") return [{ value: "all", label: "All" }, { value: "images", label: "Images" },
+        { value: "volumes", label: "Volumes" }, { value: "unused", label: "Unused" }];
+    return [{ value: "all", label: "All" }, { value: "running", label: "Running" },
+        { value: "stopped", label: "Stopped" }];
 }
 
 function rows(state, tab, query, filter, cfg) {
@@ -245,22 +357,87 @@ function rows(state, tab, query, filter, cfg) {
     }
     var search = String(query || "").toLowerCase().trim();
     output = output.filter(function (row) {
-        var matches = !search || (row.title + " " + row.subtitle + " " + row.detail).toLowerCase().indexOf(search) >= 0;
-        if (filter === "running") matches = matches && row.state === "running";
-        if (filter === "stopped") matches = matches && row.state !== "running";
-        if (filter === "localhost") matches = matches && row.badge === "localhost";
-        if (filter === "lan") matches = matches && row.badge !== "localhost";
+        var matches = !search || row.haystack.indexOf(search) >= 0;
+        if (filter === "running") matches = matches && row.rowState === "running";
+        if (filter === "stopped") matches = matches && row.rowState !== "running";
+        if (filter === "localhost") matches = matches && row.exposure === "localhost";
+        if (filter === "lan") matches = matches && row.exposure !== "localhost";
         if (filter === "images") matches = matches && row.kind === "image";
         if (filter === "volumes") matches = matches && row.kind === "volume";
-        if (filter === "unused") matches = matches && row.badge === "unused";
+        if (filter === "unused") matches = matches && (row.badge === "unused" || row.badge === "unattached");
         return matches;
     });
+    var order = ["port", "container", "image", "volume", "sqlite"];
     output.sort(function (a, b) {
+        if (a.kind !== b.kind) return order.indexOf(a.kind) - order.indexOf(b.kind);
         if (cfg.sortBy === "port" && a.port !== b.port) return a.port - b.port;
-        if (cfg.sortBy === "state" && a.state !== b.state) return a.state.localeCompare(b.state);
+        if (cfg.sortBy === "state" && a.rowState !== b.rowState) return a.rowState.localeCompare(b.rowState);
         return a.title.localeCompare(b.title) || a.id.localeCompare(b.id);
     });
     return output;
+}
+
+function counts(state, cfg) {
+    var output = {};
+    tabNames.forEach(function (tab) { output[tab] = rows(state, tab, "", "all", cfg).length; });
+    return output;
+}
+
+function summary(state, cfg) {
+    var listening = rows(state, "Localhost", "", "all", cfg).length + " listening";
+    var containers = cfg.dockerEnabled ? state.containers || [] : [];
+    if (!containers.length) return listening;
+    var running = containers.filter(function (row) { return row.state === "running"; }).length;
+    return listening + " · " + running + " of " + containers.length + " containers running";
+}
+
+// Only a failed port query makes the bar widget urgent. A missing or stopped Docker daemon is a
+// normal state on many machines and is explained inside the Docker tabs instead.
+function barError(errors) {
+    return String((errors || {}).ports || "");
+}
+
+function dockerNotice(state, errors, cfg) {
+    if (!cfg.dockerEnabled) return "Docker integration is turned off in settings.";
+    var reason = (errors || {}).docker || (errors || {}).assets || "";
+    if ((state || {}).dockerStatus === "unavailable") return "Docker is not reachable: " + (reason || "unknown reason");
+    return reason;
+}
+
+function tabLabel(tab) {
+    return tab === "Localhost" ? "Ports" : tab;
+}
+
+function emptyText(tab, query, filter, notice, sampled) {
+    if (!sampled) return "Collecting local services…";
+    if (notice && tab !== "Localhost" && (tab !== "Databases" || !String(query || "").trim())) return notice;
+    if (String(query || "").trim()) return "Nothing matches “" + String(query).trim() + "”.";
+    if (filter !== "all") return "Nothing matches this filter.";
+    if (tab === "Localhost") return "Nothing is listening on a TCP port.";
+    if (tab === "Docker") return "No containers.";
+    if (tab === "Images") return "No images or volumes.";
+    return "No databases found.\nSQLite files can be added in settings.";
+}
+
+// Turns one finished collector run into a decoded result and a user-facing diagnostic.
+function outcome(scope, raw, exitCode, timedOut) {
+    if (timedOut) return { result: null, error: "Collector timed out; showing previous data." };
+    if (exitCode === -1 && (typeof raw !== "string" || !raw.trim()))
+        return { result: null, error: "Collector could not start; is python3 installed?" };
+    if (typeof raw !== "string" || !raw.trim())
+        return { result: null, error: "Collector failed (exit " + exitCode + ")." };
+    var result;
+    try { result = decode(raw, scope); } catch (error) {
+        return { result: null, error: "Invalid collector response: " + error.message };
+    }
+    var message = result.errors.join("\n");
+    if (!message && exitCode !== 0) message = "Collector failed (exit " + exitCode + ").";
+    return { result: result, error: message };
+}
+
+// A job is stale once settings changed or, for logs, once the log view moved on.
+function current(job, generation, logGeneration) {
+    return !!job && job.generation === generation && (job.scope !== "logs" || job.logToken === logGeneration);
 }
 
 function sync(model, next) {

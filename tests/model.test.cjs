@@ -7,7 +7,7 @@ const file = path.join(__dirname, '../Model.js');
 const M = {};
 if (fs.existsSync(file)) vm.runInNewContext(fs.readFileSync(file, 'utf8').replace(/^\.pragma library\s*/, ''), M);
 const clone = value => JSON.parse(JSON.stringify(value));
-const port = (n = 3000, host = '127.0.0.1') => ({ id: `tcp:${host}:${n}`, address: host, port: n, exposure: host === '127.0.0.1' ? 'localhost' : 'all', process: 'vite', pid: 100, owner: 'dev', cwd: '/work/project', uptimeSeconds: 10, containerIds: [], database: null, protocol: 'http', state: 'running' });
+const port = (n = 3000, host = '127.0.0.1') => ({ id: `tcp:${host}:${n}`, address: host, port: n, exposure: host === '127.0.0.1' ? 'localhost' : 'all', process: 'vite', pid: 100, owner: 'dev', cwd: '/work/project', startedAt: 1700000000, containerIds: [], database: null, protocol: 'http', state: 'running' });
 const cid = 'a'.repeat(64);
 const container = () => ({id: cid, name: 'web', image: 'node:22', state: 'running', publishedPorts: [port()], database: null});
 
@@ -113,7 +113,7 @@ test('database view includes stopped evidence and only configured SQLite files',
         sqlite: [{id:'sqlite:/work/app.db', name:'app.db', path:'/work/app.db', database:'SQLite',state:'configured'}]};
     const rows = M.rows(state, 'Databases', '', 'all', M.config({}));
     assert.equal(rows.length, 3);
-    assert.equal(rows.filter(r => r.state === 'exited').length, 1);
+    assert.equal(rows.filter(r => r.rowState === 'exited').length, 1);
 });
 
 test('malformed nested image/volume fields and cross-scope sections are rejected', () => {
@@ -169,91 +169,148 @@ test('overdue scopes keep making progress after their first query', () => {
     assert.equal(M.nextScope(70000, true, M.config({dockerEnabled:false}), {ports:70000}, false), '');
 });
 
-// Execute the widget's actual JS handlers without loading a desktop shell.
-// Qt objects at the boundary are replaced only for process/timer side effects.
-function qmlHandler(source, marker, signature, context) {
-    const start = source.indexOf('{', source.indexOf(marker));
-    for (let end = source.indexOf('}', start); end !== -1; end = source.indexOf('}', end + 1)) {
-        let script;
-        try {
-            script = new vm.Script('(' + signature + source.slice(start, end + 1) + ')');
-        } catch (error) {
-            if (error instanceof SyntaxError) continue;
-            throw error;
-        }
-        return script.runInContext(context);
-    }
-    throw new Error('Cannot compile QML handler: ' + marker);
-}
-
-function widgetHarness(cancelled) {
-    const source = fs.readFileSync(path.join(__dirname, '../BarWidget.qml'), 'utf8');
-    const effects = {watchdogStops:0, forceStops:0, forceStarts:0};
-    const context = vm.createContext({
-        Model:M, requestScope:'logs', requestGeneration:1, generation:1,
-        requestLogToken:1, timedOut:false, received:false, errors:{}, busy:true,
-        lastSuccess:{}, worker:{running:true},
-        logs:{generation:cancelled ? 2 : 1, accept:() => !cancelled,
-            clear() { this.generation++; }},
-        watchdog:{stop() { effects.watchdogStops++; }},
-        forceStop:{stop() { effects.forceStops++; }, restart() { effects.forceStarts++; }}
-    });
-    context.root = context;
-    for (const match of source.matchAll(/^    function (\w+)\(([^)]*)\)\s*\{/gm)) {
-        context[match[1]] = qmlHandler(source, match[0], 'function(' + match[2] + ')', context);
-    }
-    context.exited = qmlHandler(source, 'onExited: function (exitCode, exitStatus)',
-        'function(exitCode, exitStatus)', context);
-    context.timeout = qmlHandler(source.slice(source.indexOf('id: watchdog')), 'onTriggered:',
-        'function()', context);
-    return {context, effects};
-}
-
-test('cancelled log responses and failed exits stay silent while releasing the worker', () => {
-    for (const raw of ['malformed JSON', JSON.stringify({schemaVersion:1,kind:'logs',ok:false,
-        errors:['Docker unavailable'],data:{}})]) {
-        const {context, effects} = widgetHarness(true);
-        context.consume(raw);
-        context.exited(1, 0);
-        assert.deepEqual(clone(context.errors), {});
-        assert.equal(context.received, true);
-        assert.equal(context.busy, false);
-        assert.equal(effects.watchdogStops, 1);
-        assert.equal(effects.forceStops, 1);
-    }
+test('zoned IPv4 listeners such as systemd-resolved do not reject the whole response', () => {
+    const stub = {...port(53, '127.0.0.53%lo'), process: 'Unknown', pid: null, protocol: null};
+    const payload = {schemaVersion:1,kind:'ports',ok:true,errors:[],data:{ports:[port(), stub]}};
+    assert.equal(M.decode(JSON.stringify(payload), 'ports').data.ports.length, 2);
+    assert.equal(M.url(stub, 'http'), 'http://127.0.0.53:53/');
+    assert.equal(M.addressText(stub), '127.0.0.53%lo:53');
+    for (const host of ['127.0.0.1%lo/x', '127.0.0.1%', '256.0.0.1%lo', '127.0.0.1%lo@evil'])
+        assert.throws(() => M.decode(JSON.stringify({...payload, data:{ports:[port(53, host)]}}), 'ports'), host);
 });
 
-test('cancelled log timeouts stop workers without adding a stale error', () => {
-    const {context, effects} = widgetHarness(true);
-    context.timeout();
-    assert.equal(context.timedOut, true);
-    assert.equal(context.worker.running, false);
-    assert.equal(effects.forceStarts, 1);
-    assert.deepEqual(clone(context.errors), {});
-    context.exited(1, 0);
-    assert.equal(context.busy, false);
+test('collector outcomes separate results, diagnostics, crashes and timeouts', () => {
+    const ok = JSON.stringify({schemaVersion:1,kind:'ports',ok:true,errors:[],data:{ports:[port()]}});
+    assert.equal(M.outcome('ports', ok, 0, false).error, '');
+    assert.equal(M.outcome('ports', ok, 0, false).result.data.ports.length, 1);
+    assert.match(M.outcome('ports', ok, 0, true).error, /timed out/);
+    assert.equal(M.outcome('ports', ok, 0, true).result, null);
+    assert.match(M.outcome('ports', '', 127, false).error, /exit 127/);
+    assert.match(M.outcome('ports', undefined, 1, false).error, /exit 1/);
+    assert.match(M.outcome('ports', 'malformed JSON', 0, false).error, /Invalid collector response/);
+    assert.match(M.outcome('docker', ok, 0, false).error, /Invalid collector response/);
+    const failed = JSON.stringify({schemaVersion:1,kind:'docker',ok:false,errors:['docker unavailable'],data:{dockerStatus:'unavailable'}});
+    const outcome = M.outcome('docker', failed, 1, false);
+    assert.equal(outcome.error, 'docker unavailable');
+    assert.equal(outcome.result.data.dockerStatus, 'unavailable');
+    assert.match(M.outcome('ports', ok, 3, false).error, /exit 3/);
 });
 
-test('active log errors and timeouts still reach the widget', () => {
-    const failed = widgetHarness(false).context;
-    failed.consume(JSON.stringify({schemaVersion:1,kind:'logs',ok:false,
-        errors:['Docker unavailable'],data:{}}));
-    failed.exited(1, 0);
-    assert.equal(failed.errors.logs, 'Docker unavailable');
-    assert.equal(failed.busy, false);
-    const timed = widgetHarness(false).context;
-    timed.timeout();
-    assert.ok(timed.errors.logs.includes('timeout'));
-    assert.equal(timed.worker.running, false);
+test('stale jobs are recognised after settings changes and cancelled log requests', () => {
+    assert.equal(M.current(null, 1, 1), false);
+    assert.equal(M.current({scope:'ports', generation:1, logToken:0}, 1, 9), true);
+    assert.equal(M.current({scope:'ports', generation:1, logToken:0}, 2, 9), false);
+    assert.equal(M.current({scope:'logs', generation:1, logToken:4}, 1, 4), true);
+    assert.equal(M.current({scope:'logs', generation:1, logToken:4}, 1, 5), false);
 });
 
-test('leaving logs clears a previous log error without clearing inventory errors', () => {
-    const {context} = widgetHarness(false);
-    context.errors = {logs:'Docker unavailable', ports:'Port query failed'};
-    context.clearLogs();
-    assert.equal(context.errors.logs, '');
-    assert.equal(context.errors.ports, 'Port query failed');
-    context.exited(1, 0);
-    assert.equal(context.errors.logs, '');
-    assert.equal(context.busy, false);
+test('rows carry a scannable lead, tone and exposure instead of a text blob', () => {
+    const exposed = {...port(8080, '0.0.0.0'), process:'node'};
+    const lan = {...port(9000, '192.168.1.5'), exposure:'lan'};
+    const rows = M.rows({ports:[port(), exposed, lan]}, 'Localhost', '', 'all', M.config({}));
+    assert.deepEqual(clone(rows.map(r => [r.lead, r.badge, r.tone])),
+        [['3000','local','dim'], ['8080','exposed','urgent'], ['9000','lan','warn']]);
+    assert.equal(rows[0].title, 'vite');
+    assert.match(rows[0].subtitle, /127\.0\.0\.1/);
+    assert.equal(M.rows({ports:[port(), exposed, lan]}, 'Localhost', '', 'lan', M.config({})).length, 2);
+    assert.equal(M.rows({ports:[port(), exposed, lan]}, 'Localhost', '', 'localhost', M.config({})).length, 1);
+    assert.equal(M.rows({ports:[port(), exposed]}, 'Localhost', 'NODE', 'all', M.config({})).length, 1);
+    const containers = [{...container(), health:'unhealthy'}, {...container(), id:'b'.repeat(64), name:'db', state:'exited', publishedPorts:[]}];
+    const docker = M.rows({containers}, 'Docker', '', 'all', M.config({sortBy:'name'}));
+    assert.deepEqual(clone(docker.map(r => [r.title, r.badge, r.tone])), [['db','exited','dim'], ['web','unhealthy','urgent']]);
+    const images = M.rows({images:[{id:'sha256:'+'c'.repeat(64),tags:['<none>:<none>'],used:false,size:'1MB'}],
+        volumes:[{id:'volume:data',name:'data',containers:['db'],destinations:['/var/lib'],mountpoint:'/x'}]}, 'Images', '', 'all', M.config({}));
+    // Images come before volumes, whose generated names would otherwise crowd the top.
+    assert.deepEqual(clone(images.map(r => [r.title, r.badge])), [['untagged','unused'], ['data','attached']]);
+});
+
+test('facts describe each kind without unknown noise and stay copyable', () => {
+    const now = 1700000000 + 3 * 3600 + 120;
+    const row = M.rows({ports:[{...port(), cwd:'/work/app'}]}, 'Localhost', '', 'all', M.config({}))[0];
+    const facts = clone(M.facts(row, now));
+    const value = label => (facts.find(f => f.label === label) || {}).value;
+    assert.equal(value('Address'), '127.0.0.1:3000');
+    assert.equal(value('Exposure'), 'This machine only');
+    assert.equal(value('Process'), 'vite (pid 100)');
+    assert.equal(value('Running for'), '3h 2m');
+    assert.equal(value('Working directory'), '/work/app');
+    assert.equal(value('Container'), undefined);
+    const anonymous = M.rows({ports:[{...port(53), process:'Unknown', pid:null, owner:'Unknown', cwd:null, startedAt:null, protocol:null}]}, 'Localhost', '', 'all', M.config({}))[0];
+    assert.equal(anonymous.title, 'Unknown process');
+    assert.deepEqual(clone(M.facts(anonymous, now).map(f => f.label)), ['Address', 'Exposure', 'Process']);
+    const dock = M.rows({containers:[{...container(), cpu:'0.5%', memory:'10MiB / 1GiB', restart:'always', compose:'shop'}]}, 'Docker', '', 'all', M.config({}))[0];
+    const dockFacts = clone(M.facts(dock, now));
+    assert.equal(dockFacts.find(f => f.label === 'ID').value, cid.slice(0, 12));
+    assert.equal(dockFacts.find(f => f.label === 'ID').copy, cid);
+    assert.equal(dockFacts.find(f => f.label === 'Published').value, '127.0.0.1:3000');
+    assert.deepEqual(clone(M.facts({raw:'not json', kind:'port'}, now)), []);
+});
+
+test('durations, tab counts and the header summary stay compact', () => {
+    assert.equal(M.duration(42), '42s');
+    assert.equal(M.duration(125), '2m');
+    assert.equal(M.duration(3 * 3600 + 59), '3h 0m');
+    assert.equal(M.duration(2 * 86400 + 5 * 3600), '2d 5h');
+    assert.equal(M.duration(-5), '0s');
+    const state = {ports:[port(), {...port(5432), database:'PostgreSQL'}],
+        containers:[container(), {...container(), id:'b'.repeat(64), name:'db', state:'exited', publishedPorts:[]}],
+        images:[{id:'i',tags:['a:b'],used:true,size:'1MB'}], volumes:[]};
+    assert.deepEqual(clone(M.counts(state, M.config({}))), {Localhost:2, Docker:2, Images:1, Databases:1});
+    assert.equal(M.summary(state, M.config({})), '2 listening · 1 of 2 containers running');
+    assert.equal(M.summary(state, M.config({dockerEnabled:false})), '2 listening');
+    assert.equal(M.summary({ports:[port()]}, M.config({})), '1 listening');
+    assert.deepEqual(clone(M.filters('Localhost').map(f => f.value)), ['all', 'localhost', 'lan']);
+    assert.deepEqual(clone(M.filters('Images').map(f => f.value)), ['all', 'images', 'volumes', 'unused']);
+});
+
+test('Docker being unreachable is a status with a reason, never a bar error', () => {
+    assert.equal(M.barError({ports:'', docker:'docker unavailable', assets:'docker unavailable'}), '');
+    assert.equal(M.barError({ports:'ss unavailable'}), 'ss unavailable');
+    assert.equal(M.dockerNotice({dockerStatus:'unavailable'}, {docker:'docker unavailable'}, M.config({})),
+        'Docker is not reachable: docker unavailable');
+    assert.equal(M.dockerNotice({dockerStatus:'available'}, {docker:'Docker resource usage unavailable: timeout'}, M.config({})),
+        'Docker resource usage unavailable: timeout');
+    assert.equal(M.dockerNotice({}, {}, M.config({dockerEnabled:false})), 'Docker integration is turned off in settings.');
+    assert.equal(M.dockerNotice({dockerStatus:'available'}, {}, M.config({})), '');
+});
+
+test('an unreachable or disabled Docker clears its inventory instead of showing stale rows', () => {
+    const current = {ports:[port()], containers:[container()], images:[{id:'i'}], volumes:[{id:'v'}], dockerStatus:'available'};
+    const down = M.absorb(current, {dockerStatus:'unavailable'});
+    assert.deepEqual(clone([down.containers, down.images, down.volumes, down.dockerStatus]), [[], [], [], 'unavailable']);
+    assert.equal(down.ports, current.ports);
+    assert.deepEqual(clone(M.absorb(current, {dockerStatus:'disabled'}).containers), []);
+    const up = M.absorb(down, {dockerStatus:'available', containers:[container()]});
+    assert.equal(up.containers.length, 1);
+    assert.equal(M.absorb(current, {ports:[port()]}).ports, current.ports);
+    assert.equal(M.summary(down, M.config({})), '1 listening');
+});
+
+test('empty states say why the list is empty', () => {
+    assert.match(M.emptyText('Localhost', '', 'all', '', false), /Collecting/);
+    assert.equal(M.emptyText('Docker', '', 'all', 'Docker is not reachable: docker unavailable', true),
+        'Docker is not reachable: docker unavailable');
+    assert.match(M.emptyText('Localhost', 'redis', 'all', '', true), /Nothing matches “redis”/);
+    assert.match(M.emptyText('Docker', '', 'running', '', true), /Nothing matches this filter/);
+    assert.match(M.emptyText('Localhost', '', 'all', '', true), /Nothing is listening/);
+    assert.match(M.emptyText('Databases', '', 'all', '', true), /SQLite/);
+    assert.deepEqual(clone(M.tabNames.map(M.tabLabel)), ['Ports', 'Docker', 'Images', 'Databases']);
+});
+
+test('logs are limited by what Python sends, so astral characters are not rejected', () => {
+    const wrap = text => JSON.stringify({schemaVersion:1,kind:'logs',ok:true,errors:[],data:{text,truncated:false}});
+    // 32768 code points of emoji are 65536 UTF-16 units.
+    assert.equal(M.decode(wrap('😀'.repeat(32768)), 'logs').data.text.length, 65536);
+    assert.throws(() => M.decode(wrap('x'.repeat(65537)), 'logs'));
+});
+
+test('zoned wildcard binds still open on loopback', () => {
+    assert.equal(M.url(port(8080, '0.0.0.0%eth0')), 'http://127.0.0.1:8080/');
+    assert.equal(M.url(port(8080, '::%eth0')), 'http://[::1]:8080/');
+    assert.equal(M.url(port(8080, 'fe80::1%eth0')), 'http://[fe80::1%25eth0]:8080/');
+});
+
+test('a collector that never started says so instead of quoting an exit code', () => {
+    assert.match(M.outcome('ports', undefined, -1, false).error, /could not start/);
+    assert.match(M.outcome('ports', '', 2, false).error, /exit 2/);
 });

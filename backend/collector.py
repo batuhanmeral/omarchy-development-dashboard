@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import ipaddress
 import json
 import os
@@ -13,6 +14,7 @@ import selectors
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -110,7 +112,7 @@ def endpoint(value: str) -> tuple[str, int] | None:
         port = int(raw_port)
         if not 1 <= port <= 65535:
             return None
-        if "%" in host and not re.fullmatch(r"[\w.:-]+%[\w.-]+", host):
+        if "%" in host and not re.fullmatch(r"[0-9A-Fa-f.:]+%[A-Za-z0-9_.-]+", host):
             return None
         return host, port
     except (ValueError, TypeError):
@@ -132,7 +134,7 @@ def port_row(address: str, port: int) -> dict[str, Any]:
         pid=None,
         owner="Unknown",
         cwd=None,
-        uptimeSeconds=None,
+        startedAt=None,
         containerIds=[],
         database=None,
         protocol=None,
@@ -159,8 +161,19 @@ def parse_ss(output: str) -> list[dict[str, Any]]:
     return sorted(rows.values(), key=lambda row: (row["port"], row["address"]))
 
 
+@functools.cache
+def boot_time(proc_root: Path) -> int | None:
+    """Read once per collector run; /proc/stat is large on many-core machines."""
+    try:
+        boot = re.search(r"^btime (\d+)$", (proc_root / "stat").read_text(), re.MULTILINE)
+    except OSError:
+        return None
+    return int(boot[1]) if boot else None
+
+
 def process_metadata(pid: int, proc_root: Path = Path("/proc")) -> dict[str, Any]:
-    result: dict[str, Any] = dict(process="Unknown", owner="Unknown", cwd=None, uptimeSeconds=None)
+    unknown: dict[str, Any] = dict(process="Unknown", owner="Unknown", cwd=None, startedAt=None)
+    result = dict(unknown)
     directory = proc_root / str(pid)
     try:
         before = (directory / "stat").read_text().rsplit(") ", 1)[1].split()[19]
@@ -174,11 +187,13 @@ def process_metadata(pid: int, proc_root: Path = Path("/proc")) -> dict[str, Any
             result["cwd"] = clean(os.readlink(directory / "cwd"), 2048)
         except OSError:
             pass
-        uptime = float((proc_root / "uptime").read_text().split()[0])
-        result["uptimeSeconds"] = max(0, int(uptime - int(before) / os.sysconf("SC_CLK_TCK")))
+        # Boot time plus the start tick is stable across polls, so unchanged rows stay unchanged.
+        boot = boot_time(proc_root)
+        if boot is not None:
+            result["startedAt"] = boot + int(before) // os.sysconf("SC_CLK_TCK")
         after = (directory / "stat").read_text().rsplit(") ", 1)[1].split()[19]
         if before != after:
-            return dict(process="Unknown", owner="Unknown", cwd=None, uptimeSeconds=None)
+            return unknown
     except (OSError, ValueError, IndexError):
         pass
     return result
@@ -430,6 +445,18 @@ def sqlite_inventory(files: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
+# Docker prefixes each line with an RFC 3339 UTC time down to the nanosecond.
+TIMESTAMP_PATTERN = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.\d+)?Z ", re.MULTILINE)
+
+
+def local_stamp(match: re.Match[str]) -> str:
+    try:
+        moment = datetime.fromisoformat(match[1]).replace(tzinfo=UTC).astimezone()
+    except (ValueError, OverflowError):
+        return match[0]
+    return moment.strftime("%m-%d %H:%M:%S  ")
+
+
 def read_logs(container_id: str, runner: CommandRunner) -> dict[str, Any]:
     if not ID_PATTERN.fullmatch(container_id):
         raise CollectionError("invalid container ID")
@@ -439,6 +466,7 @@ def read_logs(container_id: str, runner: CommandRunner) -> dict[str, Any]:
     )
     # Log content is displayed only after an explicit click, never cached or written to disk.
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)
+    text = TIMESTAMP_PATTERN.sub(local_stamp, text)
     text = "".join(ch for ch in text if ch.isprintable() or ch in "\n\t")
     return dict(containerId=container_id, text=text[:32768], truncated=len(text) > 32768)
 

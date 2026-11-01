@@ -34,6 +34,8 @@ class CollectorTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(c.endpoint(value), (address, port))
                 self.assertEqual(c.exposure(address), exposure)
+        # Zones are ASCII interface names, matching the UI boundary in Model.js.
+        self.assertIsNone(c.endpoint("[fe80::1%ethı]:80"))
         for value in ("bad", "localhost:30", "127.0.0.1:0", "127.0.0.1:65536", "[::1]:x"):
             self.assertIsNone(c.endpoint(value))
 
@@ -59,7 +61,7 @@ class CollectorTests(unittest.TestCase):
             root = Path(tmp)
             proc = root / "123"
             proc.mkdir()
-            (root / "uptime").write_text("1000.0 2000.0")
+            (root / "stat").write_text("cpu 1 2 3\nbtime 1700000000\n")
             # field 22 (starttime) is index 19 after the closing command parenthesis.
             fields = ["S"] + ["0"] * 18 + ["200"] + ["0"] * 10
             (proc / "stat").write_text("123 (worker (odd)) " + " ".join(fields))
@@ -68,7 +70,8 @@ class CollectorTests(unittest.TestCase):
             with patch.object(c.os, "sysconf", return_value=100):
                 meta = c.process_metadata(123, root)
             self.assertEqual(meta["process"], "postgres")
-            self.assertEqual(meta["uptimeSeconds"], 998)
+            # A start timestamp, unlike an uptime, is identical on every poll of the same process.
+            self.assertEqual(meta["startedAt"], 1700000002)
             self.assertEqual(meta["cwd"], str(root))
             self.assertNotEqual(meta["owner"], "Unknown")
             self.assertEqual(c.process_metadata(999, root)["process"], "Unknown")
