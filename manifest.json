@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.batuhanmeral.devports",
-  "name": "Development Ports",
-  "version": "1.0.0",
+  "id": "io.github.batuhanmeral.development-dashboard",
+  "name": "Development Dashboard",
+  "version": "2.0.0",
   "author": "Development Ports contributors",
   "license": "MIT",
-  "description": "Read-only view of listening ports, Docker containers, images, volumes and databases on your machine.",
+  "description": "Your development environment, one panel: listening ports and processes, Docker containers, databases, Git projects and AI coding tools. Read-only unless you turn on management actions.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,15 +13,18 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Development Ports",
-    "description": "Listening ports and Docker resources at a glance",
+    "displayName": "Development Dashboard",
+    "description": "Ports, containers, projects and AI tools at a glance",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "aliases": [
       "ports",
       "docker",
-      "dev-ports"
+      "dev-ports",
+      "dashboard",
+      "projects",
+      "devports"
     ]
   }
 }

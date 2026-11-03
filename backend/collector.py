@@ -26,8 +26,23 @@ class CollectionError(Exception):
     """A safe, non-sensitive diagnostic suitable for the UI."""
 
 
+class CommandFailed(CollectionError):
+    """A failed command with bounded, display-safe stderr for classification."""
+
+    def __init__(self, message: str, stderr: str):
+        super().__init__(message)
+        self.stderr = "\n".join(clean(line, 4096) for line in stderr.splitlines())[-4096:]
+
+
 class CommandRunner(Protocol):
-    def run(self, argv: list[str], *, merge_stderr: bool = False) -> str: ...
+    def run(
+        self,
+        argv: list[str],
+        *,
+        merge_stderr: bool = False,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str: ...
 
 
 class Runner:
@@ -38,12 +53,19 @@ class Runner:
         self.deadline = time.monotonic() + budget
         self.max_bytes = max_bytes
 
-    def run(self, argv: list[str], *, merge_stderr: bool = False) -> str:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        merge_stderr: bool = False,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> str:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise CollectionError("request budget exceeded")
-        deadline = time.monotonic() + min(remaining, self.timeout)
-        env = dict(os.environ)
+        deadline = time.monotonic() + min(remaining, self.timeout if timeout is None else timeout)
+        env = dict(os.environ) | (env or {})
         env["LC_ALL"] = "C"
         # Explicit local --host always wins over ambient Docker contexts.
         env.pop("DOCKER_CONTEXT", None)
@@ -59,13 +81,14 @@ class Runner:
         except OSError as exc:
             raise CollectionError(f"{Path(argv[0]).name} unavailable") from exc
         output = bytearray()
+        stderr = bytearray()
         size = 0
         try:
             with selectors.DefaultSelector() as selector:
                 if child.stdout is None or child.stderr is None:
                     raise CollectionError("command pipes unavailable")
-                selector.register(child.stdout, selectors.EVENT_READ, True)
-                selector.register(child.stderr, selectors.EVENT_READ, merge_stderr)
+                selector.register(child.stdout, selectors.EVENT_READ, "stdout")
+                selector.register(child.stderr, selectors.EVENT_READ, "stderr")
                 while selector.get_map():
                     wait = deadline - time.monotonic()
                     if wait <= 0:
@@ -78,14 +101,20 @@ class Runner:
                         size += len(chunk)
                         if size > self.max_bytes:
                             raise CollectionError("command output limit exceeded")
-                        if key.data:
+                        if key.data == "stderr":
+                            stderr.extend(chunk)
+                            del stderr[:-4096]
+                        if key.data == "stdout" or merge_stderr:
                             output.extend(chunk)
                 try:
                     status = child.wait(timeout=max(0.001, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired as exc:
                     raise CollectionError("command timeout") from exc
                 if status != 0:
-                    raise CollectionError(f"{Path(argv[0]).name} failed (exit {status})")
+                    raise CommandFailed(
+                        f"{Path(argv[0]).name} failed (exit {status})",
+                        stderr.decode("utf-8", errors="replace"),
+                    )
         finally:
             if child.poll() is None:
                 child.kill()
@@ -100,6 +129,43 @@ class Runner:
 def clean(value: Any, limit: int = 512) -> str:
     """Keep external text bounded and remove terminal control characters."""
     return "".join(ch for ch in str(value or "") if ch.isprintable())[:limit]
+
+
+def docker_error(exc: CollectionError) -> str:
+    detail = getattr(exc, "stderr", "")
+    lowered = detail.lower()
+    if "permission denied" in lowered:
+        return "Permission denied: your user cannot use the Docker socket."
+    if "no such container" in lowered:
+        return "The container no longer exists."
+    if "cannot connect to the docker daemon" in lowered:
+        return "The Docker daemon is not running."
+    if "timeout" in str(exc).lower() or "budget" in str(exc).lower():
+        return "Docker did not answer in time."
+    first = clean(detail.splitlines()[0], 200) if detail else ""
+    return str(exc) + (": " + first if first else "")
+
+
+SECRET_NAME = re.compile(r"pass|secret|token|key|auth|credential|cred", re.IGNORECASE)
+
+
+def redact_command(argv: list[str]) -> str:
+    result = []
+    hide_next = False
+    for value in argv:
+        if hide_next:
+            result.append("***")
+            hide_next = False
+            continue
+        name, separator, _ = value.partition("=")
+        if SECRET_NAME.search(name) and (value.startswith("-") or separator):
+            result.append(name + "=***" if separator else name)
+            hide_next = not separator
+        else:
+            result.append(
+                re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+:[^/@\s]*@", r"\1***@", value)
+            )
+    return clean(" ".join(result), 512)
 
 
 def endpoint(value: str) -> tuple[str, int] | None:
@@ -135,6 +201,10 @@ def port_row(address: str, port: int) -> dict[str, Any]:
         owner="Unknown",
         cwd=None,
         startedAt=None,
+        uid=None,
+        ownedByUser=False,
+        startTicks=None,
+        command=None,
         containerIds=[],
         database=None,
         protocol=None,
@@ -172,13 +242,31 @@ def boot_time(proc_root: Path) -> int | None:
 
 
 def process_metadata(pid: int, proc_root: Path = Path("/proc")) -> dict[str, Any]:
-    unknown: dict[str, Any] = dict(process="Unknown", owner="Unknown", cwd=None, startedAt=None)
+    unknown: dict[str, Any] = dict(
+        process="Unknown",
+        owner="Unknown",
+        cwd=None,
+        startedAt=None,
+        uid=None,
+        ownedByUser=False,
+        startTicks=None,
+        command=None,
+    )
     result = dict(unknown)
     directory = proc_root / str(pid)
     try:
         before = (directory / "stat").read_text().rsplit(") ", 1)[1].split()[19]
         result["process"] = clean((directory / "comm").read_text().strip()) or "Unknown"
         uid = directory.stat().st_uid
+        result.update(uid=uid, ownedByUser=uid == os.getuid() and uid != 0, startTicks=before)
+        try:
+            with (directory / "cmdline").open("rb") as stream:
+                raw = stream.read(65536)
+            result["command"] = redact_command(
+                raw.decode("utf-8", errors="replace").split("\0")[:-1]
+            )
+        except OSError:
+            pass
         try:
             result["owner"] = clean(pwd.getpwuid(uid).pw_name)
         except KeyError:
@@ -208,6 +296,8 @@ CONTAINER_FORMAT = (
     '"ports":{{json .NetworkSettings.Ports}},"bindings":{{json .HostConfig.PortBindings}},'
     '"restart":{{json .HostConfig.RestartPolicy.Name}},'
     '"compose":{{json (index .Config.Labels "com.docker.compose.project")}},'
+    '"exposed":{{json .Config.ExposedPorts}},'
+    '"workdir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},'
     '"mounts":{{json .Mounts}}}'
 )
 VOLUME_FORMAT = '{"name":{{json .Name}},"mountpoint":{{json .Mountpoint}}}'
@@ -332,6 +422,12 @@ def normalized_container(raw: dict[str, Any]) -> dict[str, Any]:
         state=clean(raw.get("state")) or "unknown",
         health=clean(raw.get("health")) or None,
         publishedPorts=published_ports(raw),
+        exposedPorts=sorted({clean(key) for key in (raw.get("exposed") or {})})[:64],
+        composeDir=(
+            clean(raw["workdir"], 4096)
+            if isinstance(raw.get("workdir"), str) and Path(raw["workdir"]).is_absolute()
+            else None
+        ),
         cpu=None,
         memory=None,
         restart=clean(raw.get("restart")) or "Unknown",

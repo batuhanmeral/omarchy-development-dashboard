@@ -1,0 +1,126 @@
+"""Dashboard backend contracts and bounded command diagnostics."""
+
+import json
+import os
+import sys
+import tempfile
+import tomllib
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+import collector as c
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class DashboardContracts(unittest.TestCase):
+    def test_dashboard_metadata(self):
+        manifest = json.loads((ROOT / "manifest.json").read_text())
+        package = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+        self.assertEqual(manifest["id"], "io.github.batuhanmeral.development-dashboard")
+        self.assertEqual(manifest["name"], "Development Dashboard")
+        self.assertEqual(manifest["barWidget"]["displayName"], manifest["name"])
+        self.assertEqual(manifest["version"], "2.0.0")
+        self.assertTrue(
+            {"dashboard", "projects", "devports"} <= set(manifest["barWidget"]["aliases"])
+        )
+        self.assertEqual(package["name"], "omarchy-development-dashboard")
+        self.assertEqual(package["version"], "2.0.0")
+
+    def test_runner_captures_bounded_stderr_and_counts_it_against_limit(self):
+        with self.assertRaises(c.CollectionError) as caught:
+            c.Runner().run(
+                [sys.executable, "-c", 'import sys; sys.stderr.write("x"*5000); exit(7)']
+            )
+        self.assertEqual(type(caught.exception).__name__, "CommandFailed")
+        self.assertEqual(str(caught.exception), "python3 failed (exit 7)")
+        self.assertEqual(caught.exception.stderr, "x" * 4096)
+        with self.assertRaisesRegex(c.CollectionError, "output limit"):
+            c.Runner(max_bytes=100).run(
+                [sys.executable, "-c", 'import sys; sys.stderr.write("x"*101)']
+            )
+        text = c.Runner().run(
+            [sys.executable, "-c", 'import sys; print("out"); print("err", file=sys.stderr)'],
+            merge_stderr=True,
+        )
+        self.assertIn("out", text)
+        self.assertIn("err", text)
+
+    def test_runner_per_operation_timeout_and_environment(self):
+        with self.assertRaisesRegex(c.CollectionError, "timeout"):
+            c.Runner(timeout=2).run(
+                [sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.02
+            )
+        self.assertEqual(
+            c.Runner()
+            .run(
+                [sys.executable, "-c", 'import os; print(os.environ["GIT_TERMINAL_PROMPT"])'],
+                env={"GIT_TERMINAL_PROMPT": "0"},
+            )
+            .strip(),
+            "0",
+        )
+
+    def test_docker_error_classification(self):
+        cases = [
+            ("permission denied", "Permission denied: your user cannot use the Docker socket."),
+            ("Error: No such container: a", "The container no longer exists."),
+            ("Cannot connect to the Docker daemon", "The Docker daemon is not running."),
+            ("some error\nprivate detail", "docker failed (exit 4): some error"),
+        ]
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(
+                    c.docker_error(c.CommandFailed("docker failed (exit 4)", stderr)), expected
+                )
+        self.assertEqual(
+            c.docker_error(c.CollectionError("docker timeout")), "Docker did not answer in time."
+        )
+
+    def test_redaction_table(self):
+        cases = [
+            (["node", "--password=sample"], "node --password=***"),
+            (["node", "--TOKEN", "sample", "ok"], "node --TOKEN *** ok"),
+            (["API_KEY=sample", "--auth-user=x"], "API_KEY=*** --auth-user=***"),
+            (["https://user:sample@example.test/a"], "https://***@example.test/a"),
+            (["node", "--port", "3000", "a\nb\x1b"], "node --port 3000 ab"),
+        ]
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(c.redact_command(argv), expected)
+        self.assertEqual(len(c.redact_command(["x" * 1000])), 512)
+
+    def test_process_metadata_new_fields_and_missing_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "321"
+            proc.mkdir()
+            (root / "stat").write_text("btime 1700000000\n")
+            (proc / "stat").write_text("321 (node) " + " ".join(["S"] + ["0"] * 18 + ["1234"]))
+            (proc / "comm").write_text("node")
+            (proc / "cmdline").write_bytes(b"node\0--token\0sample\0")
+            with patch.object(c.os, "getuid", return_value=proc.stat().st_uid):
+                meta = c.process_metadata(321, root)
+            self.assertEqual(meta["uid"], os.getuid())
+            self.assertEqual(meta["ownedByUser"], os.getuid() != 0)
+            self.assertEqual(meta["startTicks"], "1234")
+            self.assertEqual(meta["command"], "node --token ***")
+            (proc / "cmdline").unlink()
+            self.assertIsNone(c.process_metadata(321, root)["command"])
+            self.assertFalse(c.process_metadata(999, root)["ownedByUser"])
+            row = c.port_row("127.0.0.1", 3000)
+            self.assertIsNone(row["uid"])
+            self.assertIsNone(row["startTicks"])
+            self.assertFalse(row["ownedByUser"])
+
+    def test_container_exposed_ports_and_compose_directory(self):
+        row = c.normalized_container(
+            dict(id="a" * 64, exposed={"8080/tcp": {}, "53/udp": {}}, workdir="/home/u/app")
+        )
+        self.assertEqual(row["exposedPorts"], ["53/udp", "8080/tcp"])
+        self.assertEqual(row["composeDir"], "/home/u/app")
+        self.assertIsNone(c.normalized_container(dict(id="a", workdir="relative"))["composeDir"])
+        self.assertIn(".Config.ExposedPorts", c.CONTAINER_FORMAT)
+        self.assertIn("com.docker.compose.project.working_dir", c.CONTAINER_FORMAT)

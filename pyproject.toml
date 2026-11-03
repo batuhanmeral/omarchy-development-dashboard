@@ -1,6 +1,6 @@
 [project]
-name = "development-ports"
-version = "1.0.0"
+name = "omarchy-development-dashboard"
+version = "2.0.0"
 requires-python = ">=3.11"
 dependencies = []
 
