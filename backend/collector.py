@@ -572,8 +572,12 @@ def collect(
     include_docker: bool = True,
     sqlite_files: list[str] | None = None,
     runner: CommandRunner | None = None,
+    *,
+    project_roots: list[str] | None = None,
+    project_depth: int = 3,
+    custom_tools: list[str] | None = None,
 ) -> dict[str, Any]:
-    runner = runner or Runner()
+    runner = runner or Runner(budget=20 if scope == "projects" else 12)
     data: dict[str, Any] = {}
     errors: list[str] = []
     try:
@@ -595,6 +599,30 @@ def collect(
                 row["protocol"] = web_protocol(row["process"])
             data["ports"] = rows
             data["sqlite"] = sqlite_inventory(sqlite_files or [])
+        elif scope == "legacy":
+            from migration import legacy_settings
+
+            data.update(legacy_settings())
+        elif scope == "tools":
+            from launch import detect_tools
+
+            data.update(detect_tools(custom_tools or []))
+        elif scope == "projects":
+            from projects import discover, git_status, validate_root
+
+            roots = project_roots or []
+            if len(roots) > 16:
+                raise CollectionError("project root limit exceeded (16)")
+            valid = []
+            for root in roots:
+                try:
+                    valid.append(str(validate_root(root)))
+                except CollectionError:
+                    errors.append("Invalid project folder: " + clean(root, 4096))
+            projects, skipped = discover(valid, project_depth)
+            for project in projects[:64]:
+                project.update(git_status(Path(project["path"]), runner))
+            data.update(projects=projects, skipped=skipped)
         elif scope in ("docker", "assets"):
             if include_docker:
                 data.update(docker_inventory(runner, assets=scope == "assets"))
@@ -616,10 +644,15 @@ def collect(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("scope", choices=["ports", "docker", "assets", "logs"])
+    parser.add_argument(
+        "scope", choices=["ports", "docker", "assets", "logs", "projects", "tools", "legacy"]
+    )
     parser.add_argument("--no-docker", action="store_true")
     parser.add_argument("--sqlite-file", action="append", default=[])
     parser.add_argument("--container-id", default="")
+    parser.add_argument("--project-root", action="append", default=[])
+    parser.add_argument("--project-depth", type=int, choices=range(1, 5), default=3)
+    parser.add_argument("--custom-tool", action="append", default=[])
     args = parser.parse_args()
     result: dict[str, Any]
     if args.scope == "logs":
@@ -636,7 +669,14 @@ def main() -> int:
         except CollectionError as exc:
             result = dict(schemaVersion=1, kind="logs", ok=False, errors=[str(exc)], data={})
     else:
-        result = collect(args.scope, not args.no_docker, args.sqlite_file)
+        result = collect(
+            args.scope,
+            not args.no_docker,
+            args.sqlite_file,
+            project_roots=args.project_root,
+            project_depth=args.project_depth,
+            custom_tools=args.custom_tool,
+        )
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
     for error in result["errors"]:
         print(error, file=sys.stderr)
