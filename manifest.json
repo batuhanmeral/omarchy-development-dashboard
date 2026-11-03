@@ -3,7 +3,7 @@
   "id": "io.github.batuhanmeral.development-dashboard",
   "name": "Development Dashboard",
   "version": "2.0.0",
-  "author": "Development Ports contributors",
+  "author": "batuhanmeral",
   "license": "MIT",
   "description": "Your development environment, one panel: listening ports and processes, Docker containers, databases, Git projects and AI coding tools. Read-only unless you turn on management actions.",
   "kinds": [

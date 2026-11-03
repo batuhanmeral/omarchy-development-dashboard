@@ -17,7 +17,6 @@ Column {
     property bool imported: false
     property bool managementEnabled: false
     property string terminal: "default"
-    property string favoriteProjects: ""
     // Style and Color expose their token groups as plain QtObjects; `var` aliases keep qmllint quiet.
     readonly property var fonts: Style.font
     readonly property var gaps: Style.spacing
@@ -53,7 +52,6 @@ Column {
         sqliteInput.text = cfg.sqliteFiles;
         managementEnabled = cfg.managementEnabled;
         terminal = cfg.terminal;
-        favoriteProjects = cfg.favoriteProjects;
         rootsInput.text = cfg.projectRoots;
         depthInput.value = cfg.projectDepth;
         editorInput.text = cfg.editor;
@@ -91,7 +89,6 @@ Column {
             managementEnabled: managementEnabled,
             projectRoots: rootsInput.text.trim(),
             projectDepth: depth,
-            favoriteProjects: favoriteProjects,
             terminal: terminal,
             editor: editorInput.text.trim(),
             customTools: toolsInput.text.trim(),
@@ -237,7 +234,7 @@ Column {
     Ui.Toggle {
         width: parent.width
         label: "Docker"
-        description: "List containers, images and volumes. Read-only."
+        description: "List containers, images and volumes."
         checked: root.dockerEnabled
         foreground: root.foreground
         onClicked: root.dockerEnabled = !root.dockerEnabled

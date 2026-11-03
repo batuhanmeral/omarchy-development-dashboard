@@ -31,7 +31,7 @@ Ui.Panel {
     readonly property var projectOptions: Model.rows(inventory, "Projects", "", "all", cfg).map(function (p) {
         return {
             value: p.projectPath,
-            label: (p.favorite ? "★ " : "") + p.title + " · " + p.projectPath
+            label: p.title + " · " + p.projectPath
         };
     })
     readonly property var entries: listModel
@@ -127,22 +127,9 @@ Ui.Panel {
             hostWidget.copyText(row.copyText);
             return;
         }
-        if (action.id === "favorite") {
-            hostWidget.saveSettings({
-                settingsVersion: 2,
-                favoriteProjects: Model.toggleFavorite(cfg, row.projectPath)
-            });
-            return;
-        }
         if (action.id === "ai") {
             toolProject = row.projectPath;
             selectTab("Tools");
-            return;
-        }
-        if (action.id === "logs") {
-            selectedRow = row;
-            selectedId = row.id;
-            showLogs();
             return;
         }
         if (action.id === "open") {
@@ -523,7 +510,7 @@ Ui.Panel {
                                     Ui.Button {
                                         required property string modelData
                                         width: (tabRow.width - tabRow.spacing * (root.cfg.tabs.length - 1)) / root.cfg.tabs.length
-                                        text: Model.tabLabel(modelData) + (root.sampled && modelData !== "Overview" ? " " + (root.counts[modelData] || 0) : "")
+                                        text: Model.tabLabel(modelData) + (root.sampled && modelData !== "Projects" && modelData !== "Tools" ? " " + (root.counts[modelData] || 0) : "")
                                         selected: root.tab === modelData
                                         bordered: true
                                         foreground: root.foreground
@@ -532,11 +519,6 @@ Ui.Panel {
                                 }
                             }
 
-                            OverviewPage {
-                                width: parent.width
-                                visible: root.tab === "Overview"
-                                panel: root
-                            }
                             Ui.Dropdown {
                                 id: projectPicker
                                 objectName: "projectPicker"
@@ -560,7 +542,6 @@ Ui.Panel {
                             ListPage {
                                 id: listPage
                                 width: parent.width
-                                visible: root.tab !== "Overview"
                                 panel: root
                             }
                         }
@@ -600,11 +581,11 @@ Ui.Panel {
                         Label {
                             width: parent.width
                             readonly property bool hasMessage: !!root.hostWidget && root.hostWidget.message !== ""
-                            text: root.operating ? root.hostWidget.operation.label : hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + (root.tab === "Tools" ? "↵ launch in project" : root.tab === "Overview" ? "0–6 tabs" : "↵ details · / search · c copy") + " · s settings" : root.view === "settings" ? "Changes apply when saved · Esc cancels" : root.view === "logs" ? "Esc back to details" : "Esc back · " + Model.availableActions(root.selectedRow, root.cfg, root.inventory).filter(function (a) {
+                            text: root.operating ? root.hostWidget.operation.label : hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + (root.tab === "Tools" ? "↵ launch in project" : "↵ details · / search · c copy") + " · s settings" : root.view === "settings" ? "Changes apply when saved · Esc cancels" : root.view === "logs" ? "Esc back to details" : ["Esc back"].concat(Model.availableActions(root.selectedRow, root.cfg, root.inventory).filter(function (a) {
                                 return a.key;
                             }).map(function (a) {
                                 return a.key + " " + a.label.toLowerCase();
-                            }).join(" · ") + (root.selectedRow.containerId && root.cfg.dockerEnabled ? " · → logs" : "")
+                            })).concat(root.selectedRow.containerId && root.cfg.dockerEnabled ? ["→ logs"] : []).join(" · ")
                             color: hasMessage && root.hostWidget.messageUrgent ? root.urgent : root.dim
                             font.pixelSize: root.fonts.caption
                             elide: Text.ElideRight

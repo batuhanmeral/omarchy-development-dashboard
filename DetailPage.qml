@@ -168,7 +168,8 @@ Column {
             onClicked: root.panel.openCurrent("https")
         }
         Ui.Button {
-            visible: !!root.panel.selectedRow.copyText
+            // Projects copy their path through their own action button.
+            visible: !!root.panel.selectedRow.copyText && root.panel.selectedRow.kind !== "project"
             text: root.panel.selectedRow.url ? "Copy URL" : root.panel.selectedRow.kind === "port" ? "Copy address" : "Copy name"
             iconText: "\u{f018f}"
             bordered: true
@@ -203,15 +204,17 @@ Column {
         }
     }
     Column {
+        id: serviceList
+        readonly property var services: root.panel.selectedRow.kind === "project" ? Model.projectServices(root.panel.inventory, root.panel.selectedRow.projectPath, root.panel.cfg) : []
         width: parent.width
-        visible: root.panel.view === "detail" && root.panel.selectedRow.kind === "project"
+        visible: root.panel.view === "detail" && services.length > 0
         spacing: root.panel.gaps.md
         Label {
             text: "Services"
             color: root.panel.dim
         }
         Repeater {
-            model: root.panel.selectedRow.kind === "project" ? Model.projectServices(root.panel.inventory, root.panel.selectedRow.projectPath, root.panel.cfg) : []
+            model: serviceList.services
             Ui.Button {
                 required property var modelData
                 width: parent.width

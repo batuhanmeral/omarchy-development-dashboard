@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
@@ -30,6 +31,15 @@ SCAN_BUDGET = 8.0
 SCAN_STOPPED = "Project scan stopped early (limit reached); showing partial results."
 PRUNED = {"node_modules", "vendor", "target", "build", "dist", "venv", "__pycache__"}
 
+ENV_PORT = re.compile(
+    r"""^[^\S\n]*(?:export[^\S\n]+)?(?:PORT|[A-Za-z_][A-Za-z0-9_]*_PORT)[^\S\n]*=[^\S\n]*(?:["']([0-9]{1,5})["']|([0-9]{1,5}))[^\S\n]*(?:#[^\n]*)?$""",
+    re.MULTILINE,
+)
+SCRIPT_PORT = re.compile(r"(?:^|[\s;&|])(?:--port[= \t]+|-p[ \t]+|PORT=)([0-9]{1,5})(?=$|[\s;&|])")
+COMPOSE_PORT = re.compile(
+    r"""["'](?:[\w.]+:|\[[\da-fA-F:]+\]:)?([0-9]{1,5}):[0-9]{1,5}(?:/(?:tcp|udp))?["']"""
+)
+
 
 def validate_root(path: str) -> Path:
     try:
@@ -57,28 +67,70 @@ def validate_root(path: str) -> Path:
     return resolved
 
 
-def read_git_file(path: Path) -> str | None:
+def read_regular_file(path: Path, limit: int = 4096) -> str | None:
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             return None
-        return os.read(fd, 4096).decode("utf-8", errors="strict")
+        data = os.read(fd, limit + 1)
+        return data.decode("utf-8", errors="strict") if len(data) <= limit else None
     finally:
         os.close(fd)
+
+
+def expected_ports(project: Path) -> list[dict[str, int | str]]:
+    result: list[dict[str, int | str]] = []
+    seen: set[tuple[int, str]] = set()
+    patterns = (
+        (".env", ENV_PORT),
+        (".env.local", ENV_PORT),
+        (".env.development", ENV_PORT),
+        ("package.json", SCRIPT_PORT),
+        ("docker-compose.yml", COMPOSE_PORT),
+        ("compose.yaml", COMPOSE_PORT),
+    )
+    for name, pattern in patterns:
+        try:
+            content = read_regular_file(project / name, 65536)
+        except (OSError, UnicodeError):
+            continue
+        if content is None:
+            continue
+        inputs = [content]
+        if name == "package.json":
+            try:
+                package = json.loads(content)
+            except (ValueError, RecursionError):
+                continue
+            scripts = package.get("scripts") if isinstance(package, dict) else None
+            if not isinstance(scripts, dict):
+                continue
+            inputs = [value for value in scripts.values() if isinstance(value, str)]
+        for value in inputs:
+            for match in pattern.finditer(value):
+                number = int(match[1] or match[2]) if pattern is ENV_PORT else int(match[1])
+                entry = (number, name)
+                if not 1 <= number <= 65535 or entry in seen:
+                    continue
+                seen.add(entry)
+                result.append({"port": number, "source": name})
+                if len(result) == 16:
+                    return result
+    return result
 
 
 def head_branch(project: Path) -> tuple[str | None, bool]:
     try:
         gitdir = project / ".git"
         if not gitdir.is_dir():
-            pointer = read_git_file(gitdir)
+            pointer = read_regular_file(gitdir)
             if pointer is None or not pointer.startswith("gitdir: "):
                 return None, False
             gitdir = project / pointer[8:].strip()
         if not gitdir.is_dir():
             return None, False
-        raw = read_git_file(gitdir / "HEAD")
+        raw = read_regular_file(gitdir / "HEAD")
         if raw is None:
             return None, False
         head = raw.strip()
@@ -155,6 +207,7 @@ def discover(
                         name=clean(real.name),
                         path=str(real),
                         root=str(root),
+                        expectedPorts=expected_ports(real),
                         **unknown_status(real),
                     )
                 )

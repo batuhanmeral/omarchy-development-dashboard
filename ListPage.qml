@@ -41,7 +41,6 @@ Column {
 
     Item {
         width: parent.width
-        visible: root.panel.tab !== "Overview"
         implicitHeight: Math.max(search.implicitHeight, filterGroup.implicitHeight)
         Ui.TextField {
             id: search
@@ -205,7 +204,7 @@ Column {
 
     Item {
         width: parent.width
-        visible: root.panel.tab !== "Overview" && root.panel.entries.count === 0
+        visible: root.panel.entries.count === 0
         implicitHeight: Style.space(132)
         Label {
             anchors.centerIn: parent

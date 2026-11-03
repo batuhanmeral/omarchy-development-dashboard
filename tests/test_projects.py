@@ -204,3 +204,58 @@ class ProjectsTests(unittest.TestCase):
         self.assertEqual(row["branch"], "main")
         self.assertEqual(row["untracked"], 1)
         self.assertEqual(row["gitState"], "dirty")
+
+    def test_expected_ports_only_exports_numbers_and_filenames(self):
+        project = self.repo(self.root / "app")
+        (project / ".env").write_text(
+            "PORT=3000\nDB_PORT='5432'\nPASSWORD=private\nBAD_PORT=65536\n"
+        )
+        (project / ".env.local").write_text("export PORT=4000 # local\n")
+        (project / ".env.development").write_bytes(b"PORT=1000\n\xff")
+        (project / "package.json").write_text(
+            json.dumps(
+                {
+                    "scripts": {
+                        "dev": "vite --port=5173",
+                        "other": "PORT=9090 app -p 8080 --port 9999",
+                    },
+                    "description": "--port=1234",
+                }
+            )
+        )
+        (project / "compose.yaml").write_text('ports:\n  - "127.0.0.1:6380:6379"\n  - "8000:80"\n')
+        result = c.collect("projects", project_roots=[str(self.root)])
+        self.assertEqual(
+            [
+                (entry["port"], entry["source"])
+                for entry in result["data"]["projects"][0]["expectedPorts"]
+            ],
+            [
+                (3000, ".env"),
+                (5432, ".env"),
+                (4000, ".env.local"),
+                (5173, "package.json"),
+                (9090, "package.json"),
+                (8080, "package.json"),
+                (9999, "package.json"),
+                (6380, "compose.yaml"),
+                (8000, "compose.yaml"),
+            ],
+        )
+        self.assertNotIn("private", json.dumps(result))
+
+    def test_expected_ports_skips_special_and_oversized_files_and_caps_results(self):
+        project = self.repo(self.root / "app")
+        outside = self.root / "outside"
+        outside.write_text("PORT=7777")
+        (project / ".env").symlink_to(outside)
+        os.mkfifo(project / ".env.local")
+        (project / ".env.development").write_text("PORT=8888\n" + " " * 65536)
+        (project / "docker-compose.yml").write_text(
+            "".join(f'- "{port}:80"\n' for port in range(9000, 9020))
+        )
+        result = c.collect("projects", project_roots=[str(self.root)])
+        self.assertEqual(
+            [entry["port"] for entry in result["data"]["projects"][0]["expectedPorts"]],
+            list(range(9000, 9016)),
+        )

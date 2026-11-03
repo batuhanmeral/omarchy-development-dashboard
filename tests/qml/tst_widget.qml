@@ -348,11 +348,14 @@ TestCase {
     }
     function test_fixedTabShortcutsAndHiddenTabs() {
         const p = openPanel();
-        const names = ["Overview", "Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
-        for (let i = 0; i < 7; i++) {
-            keyClick(Qt.Key_0 + i);
+        const names = ["Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
+        for (let i = 0; i < 6; i++) {
+            keyClick(Qt.Key_1 + i);
             compare(p.panel.tab, names[i]);
         }
+        // There is no Overview section any more; 0 is not a section key.
+        keyClick(Qt.Key_0);
+        compare(p.panel.tab, "Tools");
         p.widget.settings = {
             settingsVersion: 2,
             visibleTabs: "Localhost,Tools",
@@ -478,8 +481,10 @@ TestCase {
             }
         }));
         operation.exit(0);
+        // Favorites were removed: F neither saves settings nor changes the project.
+        fakeBar.saved = [];
         keyClick(Qt.Key_F, Qt.ShiftModifier);
-        compare(p.widget.cfg.favoriteProjects, "/work/app");
+        compare(fakeBar.saved.length, 0);
         keyClick(Qt.Key_A);
         compare(p.panel.tab, "Tools");
         compare(p.panel.toolProject, "/work/app");
@@ -545,7 +550,7 @@ TestCase {
         verify(p.widget.message.indexOf("timed out") >= 0);
     }
 
-    function test_favoritingDoesNotHideMigratedTabs() {
+    function test_migratedTabsIncludeNewSectionsWithoutOverview() {
         const p = openPanel();
         p.widget.settings = {
             visibleTabs: "Localhost,Docker",
@@ -563,10 +568,11 @@ TestCase {
                 }
             ]
         };
-        p.panel.selectTab("Projects");
-        keyClick(Qt.Key_F, Qt.ShiftModifier);
-        compare(p.widget.cfg.tabs.join(","), "Overview,Localhost,Docker,Projects,Tools");
-        compare(p.widget.cfg.favoriteProjects, "/work/app");
+        compare(p.widget.cfg.tabs.join(","), "Localhost,Docker,Projects,Tools");
+        verify(p.widget.saveSettings({
+            compact: false
+        }));
+        compare(p.widget.cfg.tabs.join(","), "Localhost,Docker,Projects,Tools");
     }
 
     function test_scopeWarningsAreIsolatedAndPartialProjectsRemainVisible() {
@@ -805,10 +811,10 @@ TestCase {
         t.widget.start("tools", null);
         compare(t.worker.command.slice(2).join("|"), "tools|--custom-tool=-x|aider");
     }
-    function test_initialTabIsOverviewOrFirstVisibleTab() {
+    function test_initialTabIsFirstVisibleTab() {
         const t = createWidget();
         t.widget.open();
-        compare(t.widget.panel.tab, "Overview");
+        compare(t.widget.panel.tab, "Localhost");
         t.widget.close();
         const hidden = createWidget();
         hidden.widget.settings = {

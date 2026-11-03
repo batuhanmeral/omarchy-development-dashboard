@@ -255,7 +255,7 @@ test('durations, tab counts and the header summary stay compact', () => {
     const state = {ports:[port(), {...port(5432), database:'PostgreSQL'}],
         containers:[container(), {...container(), id:'b'.repeat(64), name:'db', state:'exited', publishedPorts:[]}],
         images:[{id:'i',tags:['a:b'],used:true,size:'1MB'}], volumes:[]};
-    assert.deepEqual(clone(M.counts(state, M.config({}))), {Overview:0, Localhost:2, Docker:2, Images:1, Databases:1, Projects:0, Tools:0});
+    assert.deepEqual(clone(M.counts(state, M.config({}))), {Localhost:2, Docker:2, Images:1, Databases:1, Projects:0, Tools:0});
     assert.equal(M.summary(state, M.config({})), '2 listening · 1 of 2 containers running');
     assert.equal(M.summary(state, M.config({dockerEnabled:false})), '2 listening');
     assert.equal(M.summary({ports:[port()]}, M.config({})), '1 listening');
@@ -294,7 +294,7 @@ test('empty states say why the list is empty', () => {
     assert.match(M.emptyText('Docker', '', 'running', '', true), /Nothing matches this filter/);
     assert.match(M.emptyText('Localhost', '', 'all', '', true), /Nothing is listening/);
     assert.match(M.emptyText('Databases', '', 'all', '', true), /SQLite/);
-    assert.deepEqual(clone(M.tabNames.map(M.tabLabel)), ['Overview', 'Ports', 'Docker', 'Images', 'DBs', 'Projects', 'AI']);
+    assert.deepEqual(clone(M.tabNames.map(M.tabLabel)), ['Ports', 'Docker', 'Images', 'DBs', 'Projects', 'AI']);
 });
 
 test('logs are limited by what Python sends, so astral characters are not rejected', () => {
@@ -333,9 +333,11 @@ test('dashboard identity, fixed tab keys and versioned visibility migration', ()
     assert.equal(M.pluginId, 'io.github.batuhanmeral.development-dashboard');
     assert.equal(M.legacyPluginId, 'io.github.batuhanmeral.devports');
     assert.equal(M.displayName, 'Development Dashboard');
-    assert.deepEqual(clone(M.config({visibleTabs:'Localhost,Docker'}).tabs), ['Overview','Localhost','Docker','Projects','Tools']);
+    assert.deepEqual(clone(M.config({visibleTabs:'Localhost,Docker'}).tabs), ['Localhost','Docker','Projects','Tools']);
     assert.deepEqual(clone(M.config({settingsVersion:2,visibleTabs:'Docker,Tools'}).tabs), ['Docker','Tools']);
-    for (let n=0;n<7;n++) assert.equal(M.tabKey(String(n)), M.tabNames[n]);
+    for (let n=1;n<=6;n++) assert.equal(M.tabKey(String(n)), M.tabNames[n-1]);
+    assert.equal(M.tabKey('0'), '');
+    assert.equal(M.tabKey('1'), 'Localhost');
     assert.equal(M.tabKey('2', M.config({settingsVersion:2,visibleTabs:'Localhost'})), '');
     assert.equal(M.tabKey('9'), '');
     assert.equal(M.config({}).managementEnabled, false);
@@ -344,7 +346,7 @@ test('dashboard identity, fixed tab keys and versioned visibility migration', ()
 
 test('dashboard settings validate roots, bounds, editor and custom grammar', () => {
     assert.equal(M.validateSettings({projectRoots:'/work\n/home/u/projects',projectDepth:4,terminal:'kitty',customTools:'Aider | aider | --no-auto-commits'}).length,0);
-    for (const invalid of [{projectRoots:'relative'}, {projectRoots:'/proc/x'}, {projectRoots:'/a\0b'}, {projectRoots:Array(17).fill('/x').join('\n')}, {projectDepth:5}, {projectDepth:1.2}, {terminal:'sh'}, {editor:'x'.repeat(257)}, {editor:'code\n--wait'}, {favoriteProjects:'relative'}, {customTools:'bad | sh; rm'}])
+    for (const invalid of [{projectRoots:'relative'}, {projectRoots:'/proc/x'}, {projectRoots:'/a\0b'}, {projectRoots:Array(17).fill('/x').join('\n')}, {projectDepth:5}, {projectDepth:1.2}, {terminal:'sh'}, {editor:'x'.repeat(257)}, {editor:'code\n--wait'}, {customTools:'bad | sh; rm'}])
         assert.ok(M.validateSettings(invalid).length, JSON.stringify(invalid));
     const cfg = M.config({projectDepth:99,terminal:'invalid',projectRoots:'/work',managementEnabled:true});
     assert.equal(cfg.projectDepth,3); assert.equal(cfg.terminal,'default'); assert.equal(cfg.managementEnabled,true);
@@ -383,31 +385,24 @@ test('project services associate longest path only and respect path boundaries',
     assert.equal(M.projectServices(state,'/a',cfg).length,0);
 });
 
-test('project and tool rows filter, search and put favorites first', () => {
+test('project and tool rows filter, search and sort by name', () => {
     const state={projects:[project('/work/a'),project('/work/z',{gitState:'dirty',changed:2}),project('/work/b',{branch:'feature'})],tools:[tool(),tool('codex',false)],ports:[port()]};
     const cfg=M.config({favoriteProjects:'/work/z'});
-    assert.equal(M.rows(state,'Projects','','all',cfg)[0].title,'z');
-    assert.equal(M.rows(state,'Projects','','favorites',cfg).length,1);
+    assert.deepEqual(clone(M.rows(state,'Projects','','all',cfg).map(r=>r.title)),['a','b','z']);
+    assert.deepEqual(clone(M.filters('Projects').map(f=>f.value)),['all','active','dirty','conflicts']);
+    assert.equal(M.config({favoriteProjects:'/work/z'}).favoriteProjects,undefined);
     assert.equal(M.rows(state,'Projects','','dirty',cfg)[0].badge,'main*');
     assert.equal(M.rows(state,'Projects','feature','all',cfg)[0].title,'b');
     assert.equal(M.rows(state,'Tools','','available',cfg).length,1);
     assert.equal(M.rows(state,'Tools','codex','all',cfg)[0].badge,'missing');
-    assert.equal(M.toggleFavorite(cfg,'/work/z'),'');
-    assert.equal(M.toggleFavorite(cfg,'/work/a'),'/work/z\n/work/a');
     assert.match(M.emptyText('Projects','','all','',false,M.config({})),/No project folders yet/);
     assert.match(M.emptyText('Projects','','all','',false,M.config({projectRoots:'/work'})),/Scanning projects/);
 });
 
-test('overview counts inventory and limits favorite and exposed lists', () => {
+test('project facts report branch and related services', () => {
     const state={projects:[project()],tools:[tool(),tool('codex',false)],ports:[port(),{...port(5432,'0.0.0.0'),database:'PostgreSQL'}],containers:[{...container(),publishedPorts:[],health:'unhealthy'}]};
-    const cfg=M.config({favoriteProjects:'/work/project'});
-    const o=M.overview(state,cfg);
-    assert.equal(o.listening.total,2);assert.equal(o.listening.exposed,1);
-    assert.deepEqual(clone(o.containers),{running:1,total:1,unhealthy:1});
-    assert.equal(o.databases,1);assert.equal(o.projects.total,1);assert.equal(o.projects.favorites,1);
-    assert.deepEqual(clone(o.aiTools),{available:1,total:2});
-    assert.equal(o.favorites[0].serviceCount,2);assert.equal(o.exposed.length,1);
-    assert.equal(M.overview({...state,ports:Array.from({length:8},(_,i)=>port(8000+i,'0.0.0.0'))},cfg).exposed.length,5);
+    const cfg=M.config({});
+    assert.equal(M.overview,undefined);
     const facts=M.facts(M.rows(state,'Projects','','all',cfg)[0],0);
     assert.match(facts.find(f=>f.label==='Branch').value,/1.*2/);
     assert.equal(facts.find(f=>f.label==='Services').value,'2');
@@ -416,14 +411,15 @@ test('overview counts inventory and limits favorite and exposed lists', () => {
 test('management is opt in and never terminates container or unowned listeners', () => {
     const cfg=M.config({managementEnabled:true});
     const c=M.viewRow(container(),'container');
-    assert.deepEqual(clone(M.availableActions(c,M.config({}),{}).map(a=>a.id)),['logs','open']);
+    assert.deepEqual(clone(M.availableActions(c,M.config({}),{}).map(a=>a.id)),['open']);
     for (const id of ['stop','restart']) assert.ok(M.availableActions(c,cfg,{}).find(a=>a.id===id).confirm);
     assert.ok(M.availableActions(M.viewRow({...container(),state:'exited'},'container'),cfg,{}).some(a=>a.id==='start'));
     const p=M.viewRow({...port(),ownedByUser:true,startTicks:'123'},'port');
     assert.equal(M.canManage(p,cfg),true); assert.equal(M.canManage(p,M.config({})),false);
     for (const extra of [{ownedByUser:false},{containerName:'web'},{containerIds:[cid]},{pid:null},{startTicks:null}])
         assert.equal(M.canManage(M.viewRow({...port(),ownedByUser:true,startTicks:'123',...extra},'port'),cfg),false);
-    assert.ok(M.availableActions(M.viewRow(project(),'project'),cfg,{}).some(a=>a.key==='F'));
+    assert.deepEqual(clone(M.availableActions(M.viewRow(project(),'project'),cfg,{}).map(a=>a.key)),['t','e','f','c','a']);
+    assert.equal(M.availableActions(c,cfg,{}).filter(a=>a.id==='logs').length,0);
 });
 
 test('actions use separate validated argv entries for every operation', () => {
@@ -517,8 +513,7 @@ test('service indexing remains current across inventory and view-setting changes
     assert.equal(M.projectServices(state,'/work/project',M.config({hiddenPorts:'3000',dockerEnabled:false})).length,0);
     assert.equal(M.projectServices({...state,ports:[]},'/work/project',cfg).length,1);
     assert.equal(M.rows({...state,ports:[]},'Projects','','active',cfg).length,1);
-    const o=M.overview(state,cfg);
-    assert.equal(o.listening.total,2);
+    assert.equal(M.rows(state,'Localhost','','all',cfg).length,2);
 });
 
 test('scope diagnostics replace scanning placeholders even without an accepted inventory', () => {
@@ -532,4 +527,29 @@ test('scope diagnostics replace scanning placeholders even without an accepted i
 test('direct project views preserve the optional configuration argument with indexed services', () => {
     const state={projects:[project()],ports:[port()]};
     assert.equal(M.viewRow(state.projects[0],'project',state).serviceCount,1);
+});
+
+test('project conflicts exclude own listeners and include other projects and unassigned services', () => {
+    const project = {id:'project:/work/project', path:'/work/project', name:'app', branch:'main', gitState:'clean',
+        expectedPorts:[3000,3001,3002,3003,3004].map(port => ({port, source:'.env'}))};
+    const state = {
+        projects:[project, {id:'project:/work/other', path:'/work/other', name:'other'}],
+        ports:[port(), {...port(3001), cwd:'/work/other', process:'node'}, {...port(3002), cwd:null, process:'python'}],
+        containers:[
+            {...container(), composeDir:'/work/project', publishedPorts:[port(3003)]},
+            {...container(), id:'b'.repeat(64), name:'proxy', publishedPorts:[port(3004)]}
+        ]
+    };
+    const cfg = M.config({});
+    assert.deepEqual(clone(M.portConflicts(state, project, cfg)), [
+        {port:3001, source:'.env', holder:'node'},
+        {port:3002, source:'.env', holder:'python'},
+        {port:3004, source:'.env', holder:'proxy'}
+    ]);
+    const rows = M.rows(state, 'Projects', '', 'conflicts', cfg);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tone, 'warn');
+    assert.equal(rows[0].badge, 'main !');
+    assert.ok(M.facts(rows[0], 0).some(fact => fact.label === 'Port conflicts' && fact.value.includes('3004')));
+    assert.ok(M.filters('Projects').some(filter => filter.value === 'conflicts'));
 });

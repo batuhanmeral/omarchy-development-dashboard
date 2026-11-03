@@ -20,7 +20,7 @@ ones ask for confirmation first.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/batuhanmeral/omarchy-dev-ports --enable
+omarchy plugin add https://github.com/batuhanmeral/omarchy-development-dashboard --enable
 ```
 
 Omarchy clones the repository into
@@ -55,7 +55,6 @@ No Python or JavaScript packages are installed.
 
 | Key | Section | What it shows |
 | --- | --- | --- |
-| `0` | Overview | Counts at a glance, favorite projects, services reachable from the network |
 | `1` | Ports | Listening TCP ports, exposure (local / LAN / all interfaces), process, PID, owner, command |
 | `2` | Docker | Containers (running and stopped), health, CPU/memory, published and exposed ports, logs |
 | `3` | Images | Images and volumes, and whether they are in use |
@@ -74,13 +73,12 @@ Keys `1`–`4` work as they did in Development Ports.
 | `Enter` | Open details (in AI Tools: launch the selected tool) |
 | `Esc` | Back, clear the search, then close |
 | `/` | Search |
-| `0`–`6` | Jump to a section |
+| `1`–`6` | Jump to a section |
 | `r` | Refresh now |
 | `s` | Settings |
 | `c` | Copy the URL, address, name or project path |
 | `o` | Open a known web service in the browser |
 | `t` / `e` / `f` | Project: open in terminal / editor / file manager |
-| `F` | Project: add to or remove from favorites |
 | `a` | Project: pick an AI tool for this project |
 | `u` | Container: start\* |
 | `x` / `Delete` | Container: stop\*; port: stop the process\* |
@@ -92,7 +90,7 @@ Keys `1`–`4` work as they did in Development Ports.
 ## Settings
 
 Settings are stored in the widget's entry in `~/.config/omarchy/shell.json` and change only
-when you press **Save** (adding a favorite saves immediately).
+when you press **Save**.
 
 | Setting | Default | Notes |
 | --- | --- | --- |

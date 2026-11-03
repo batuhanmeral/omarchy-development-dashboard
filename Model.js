@@ -4,7 +4,7 @@ var pluginId = "io.github.batuhanmeral.development-dashboard";
 var legacyPluginId = "io.github.batuhanmeral.devports";
 var displayName = "Development Dashboard";
 var tagline = "Your development environment, one panel.";
-var tabNames = ["Overview", "Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
+var tabNames = ["Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
 var terminals = ["default", "alacritty", "foot", "ghostty", "kitty"];
 
 function validPath(path) {
@@ -69,7 +69,7 @@ function config(raw) {
     var ranges;
     try { ranges = portRanges(raw.hiddenPorts); } catch (error) { ranges = []; }
     var selected = raw.visibleTabs === undefined ? tabNames : String(raw.visibleTabs).split(",");
-    if (!(Number(raw.settingsVersion) >= 2)) selected = selected.concat(["Overview", "Projects", "Tools"]);
+    if (!(Number(raw.settingsVersion) >= 2)) selected = selected.concat(["Projects", "Tools"]);
     var tabs = tabNames.filter(function (name) { return selected.indexOf(name) !== -1; });
     return {
         refreshInterval: isFinite(interval) && interval >= 2 && interval <= 120 ? Math.round(interval) : 5,
@@ -86,7 +86,6 @@ function config(raw) {
         managementEnabled: raw.managementEnabled === true,
         projectRoots: lines(raw.projectRoots).filter(validRoot).slice(0, 16).join("\n"),
         projectDepth: Number.isInteger(Number(raw.projectDepth)) && Number(raw.projectDepth) >= 1 && Number(raw.projectDepth) <= 4 ? Number(raw.projectDepth) : 3,
-        favoriteProjects: lines(raw.favoriteProjects).filter(validPath).slice(0, 128).join("\n"),
         terminal: terminals.indexOf(raw.terminal) >= 0 ? raw.terminal : "default",
         editor: typeof raw.editor === "string" && raw.editor.length <= 256 && !/[\x00-\x1f\x7f]/.test(raw.editor) ? raw.editor : "",
         customTools: typeof raw.customTools === "string" ? raw.customTools : ""
@@ -109,8 +108,6 @@ function validateSettings(raw) {
         errors.push("SQLite needs at most 32 absolute file paths, one per line.");
     if (lines(raw.projectRoots).length > 16 || lines(raw.projectRoots).some(function (p) { return !validRoot(p); }))
         errors.push("Project folders need at most 16 absolute, permitted directory paths.");
-    if (lines(raw.favoriteProjects).length > 128 || lines(raw.favoriteProjects).some(function (p) { return !validPath(p); }))
-        errors.push("Favorites need at most 128 absolute paths.");
     if (raw.projectDepth !== undefined && (!Number.isInteger(Number(raw.projectDepth)) || Number(raw.projectDepth) < 1 || Number(raw.projectDepth) > 4))
         errors.push("Scan depth must be an integer from 1 to 4.");
     if (raw.terminal !== undefined && terminals.indexOf(raw.terminal) < 0) errors.push("Select a supported terminal.");
@@ -151,6 +148,11 @@ function validPort(row) {
         && Array.isArray(row.containerIds) && row.containerIds.every(function (id) { return /^[a-f0-9]{64}$/.test(id); });
 }
 
+function validExpectedPort(entry) {
+    return plain(entry) && Number.isInteger(entry.port) && entry.port >= 1 && entry.port <= 65535
+        && [".env", ".env.local", ".env.development", "package.json", "docker-compose.yml", "compose.yaml"].indexOf(entry.source) >= 0;
+}
+
 function decode(raw, expected) {
     if (typeof raw !== "string" || raw.length > 2 * 1024 * 1024) throw new Error("Response size limit exceeded.");
     var result = JSON.parse(raw);
@@ -186,7 +188,9 @@ function decode(raw, expected) {
                 throw new Error("Invalid inventory identity.");
             seen[row.id] = true;
             if (section === "projects" && (!validPath(row.path) || row.id !== "project:" + row.path
-                    || typeof row.name !== "string" || ["clean", "dirty", "unknown"].indexOf(row.gitState) < 0)) throw new Error("Invalid project.");
+                    || typeof row.name !== "string" || (row.expectedPorts !== undefined
+                        && (!Array.isArray(row.expectedPorts) || row.expectedPorts.length > 16 || !row.expectedPorts.every(validExpectedPort)))
+                    || ["clean", "dirty", "unknown"].indexOf(row.gitState) < 0)) throw new Error("Invalid project.");
             if (section === "tools" && (!/^[a-z0-9-]{1,40}$/.test(row.id) || typeof row.name !== "string" || typeof row.available !== "boolean")) throw new Error("Invalid tool.");
             if (section === "ports" && !validPort(row)) throw new Error("Invalid port.");
             if (section === "images" && (!Array.isArray(row.tags) || !row.tags.every(function (v) { return typeof v === "string"; }) || typeof row.used !== "boolean"))
@@ -305,8 +309,8 @@ function viewRow(row, kind, state, cfg, index) {
     view.ownedByUser = row.ownedByUser === true;
     view.startTicks = row.startTicks || "";
     view.command = row.command || "";
-    view.favorite = !!cfg && lines(cfg.favoriteProjects).indexOf(row.path) >= 0;
     view.serviceCount = kind === "project" && index ? indexedServices(index, row.path, cfg || config({})).length : 0;
+    view.portConflicts = "";
     var words = [];
     if (kind === "project") {
         view.title = row.name;
@@ -314,6 +318,12 @@ function viewRow(row, kind, state, cfg, index) {
         view.projectPath = row.path;
         view.badge = (row.branch || "unknown") + (row.gitState === "dirty" ? "*" : "");
         view.tone = row.conflicts ? "urgent" : row.gitState === "dirty" ? "warn" : row.gitState === "clean" ? "ok" : "dim";
+        var conflicts = index ? portConflicts(state, row, cfg || config({}), index) : [];
+        if (conflicts.length) {
+            view.badge += " !";
+            view.tone = "warn";
+            view.portConflicts = conflicts.map(function (item) { return ":" + item.port + " · " + item.source + " · " + item.holder; }).join("\n");
+        }
         view.copyText = row.path;
         words = [row.root, row.branch];
     } else if (kind === "tool") {
@@ -421,6 +431,7 @@ function facts(view, now) {
         add("Working tree", row.gitState + " · " + (row.changed || 0) + " changed · " + (row.untracked || 0) + " untracked · " + (row.conflicts || 0) + " conflicts");
         add("Root", row.root);
         add("Services", view.serviceCount || 0);
+        add("Port conflicts", view.portConflicts);
     } else if (view.kind === "tool") {
         add("Executable", row.executable); add("Path", row.path); add("Status", row.available ? "Available" : row.reason || "not found");
     } else if (view.kind === "image") {
@@ -443,7 +454,7 @@ function facts(view, now) {
 }
 
 function filters(tab) {
-    if (tab === "Projects") return [{value:"all",label:"All"},{value:"favorites",label:"Favorites"},{value:"active",label:"Active"},{value:"dirty",label:"Dirty"}];
+    if (tab === "Projects") return [{value:"all",label:"All"},{value:"active",label:"Active"},{value:"dirty",label:"Dirty"},{value:"conflicts",label:"Conflicts"}];
     if (tab === "Tools") return [{value:"all",label:"All"},{value:"available",label:"Available"}];
     if (tab === "Localhost") return [{ value: "all", label: "All" }, { value: "localhost", label: "Local" },
         { value: "lan", label: "Exposed" }];
@@ -484,15 +495,14 @@ function rows(state, tab, query, filter, cfg, index) {
         if (filter === "images") matches = matches && row.kind === "image";
         if (filter === "volumes") matches = matches && row.kind === "volume";
         if (filter === "unused") matches = matches && (row.badge === "unused" || row.badge === "unattached");
-        if (filter === "favorites") matches = matches && row.favorite;
         if (filter === "active") matches = matches && row.serviceCount > 0;
         if (filter === "dirty") matches = matches && JSON.parse(row.raw).gitState === "dirty";
+        if (filter === "conflicts") matches = matches && !!row.portConflicts;
         if (filter === "available") matches = matches && row.badge === "available";
         return matches;
     });
     var order = ["port", "container", "image", "volume", "sqlite"];
     output.sort(function (a, b) {
-        if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
         if (a.kind !== b.kind) return order.indexOf(a.kind) - order.indexOf(b.kind);
         if (cfg.sortBy === "port" && a.port !== b.port) return a.port - b.port;
         if (cfg.sortBy === "state" && a.rowState !== b.rowState) return a.rowState.localeCompare(b.rowState);
@@ -505,8 +515,7 @@ function counts(state, cfg) {
     var output = {};
     var index = serviceIndex(state, cfg);
     tabNames.forEach(function (tab) {
-        if (tab === "Overview") output[tab] = 0;
-        else if (tab === "Projects") output[tab] = (state.projects || []).length;
+        if (tab === "Projects") output[tab] = (state.projects || []).length;
         else if (tab === "Tools") output[tab] = (state.tools || []).length;
         else output[tab] = rows(state, tab, "", "all", cfg, index).length;
     });
@@ -644,7 +653,7 @@ function nextScope(now, opened, cfg, last, busy) {
 }
 
 function tabKey(key, cfg) {
-    var tab = /^[0-6]$/.test(String(key)) ? tabNames[Number(key)] : "";
+    var tab = /^[1-6]$/.test(String(key)) ? tabNames[Number(key) - 1] : "";
     return tab && (!cfg || cfg.tabs.indexOf(tab) >= 0) ? tab : "";
 }
 
@@ -669,7 +678,8 @@ function serviceIndex(state, cfg) {
     var index = {projectsSource:state.projects, portsSource:state.ports, containersSource:state.containers,
         dockerEnabled:cfg.dockerEnabled, paths:(state.projects || []).map(function (p) { return p.path; }).filter(validPath)
             .sort(function (a, b) { return b.length - a.length; }),
-        ports:Object.create(null), containers:Object.create(null), services:Object.create(null), listeners:listeners(state, cfg.dockerEnabled)};
+        ports:Object.create(null), containers:Object.create(null), services:Object.create(null), listeners:listeners(state, cfg.dockerEnabled),
+        byPort:Object.create(null), containerRows:Object.create(null)};
     function assign(row, kind, path) {
         var match = projectPath(state, path, index);
         (kind === "port" ? index.ports : index.containers)[row.id] = match;
@@ -677,10 +687,42 @@ function serviceIndex(state, cfg) {
         if (!index.services[match]) index.services[match] = [];
         index.services[match].push({row:row, kind:kind});
     }
-    index.listeners.forEach(function (row) { assign(row, "port", row.cwd); });
-    if (cfg.dockerEnabled) (state.containers || []).forEach(function (row) { assign(row, "container", row.composeDir); });
+    index.listeners.forEach(function (row) {
+        assign(row, "port", row.cwd);
+        if (!index.byPort[row.port]) index.byPort[row.port] = [];
+        index.byPort[row.port].push(row);
+    });
+    if (cfg.dockerEnabled) (state.containers || []).forEach(function (row) {
+        index.containerRows[row.id] = row;
+        assign(row, "container", row.composeDir);
+    });
     serviceCache = index;
     return index;
+}
+
+function portConflicts(state, project, cfg, index) {
+    index = index || serviceIndex(state, cfg);
+    var output = [];
+    (project.expectedPorts || []).forEach(function (entry) {
+        var holders = Object.create(null);
+        function add(holder) {
+            if (holders[holder]) return;
+            holders[holder] = true;
+            output.push({port:entry.port, source:entry.source, holder:holder});
+        }
+        (index.byPort[entry.port] || []).forEach(function (row) {
+            if (row.containerIds.length && cfg.dockerEnabled) {
+                row.containerIds.forEach(function (id) {
+                    var container = index.containerRows[id];
+                    if (index.containers[id] !== project.path)
+                        add(container ? container.name || id.slice(0, 12) : row.containerName || id.slice(0, 12));
+                });
+            } else if (index.ports[row.id] !== project.path) {
+                add(row.containerName || row.process || addressText(row));
+            }
+        });
+    });
+    return output;
 }
 
 function projectPath(state, path, index) {
@@ -701,24 +743,6 @@ function projectServices(state, path, cfg, index) {
     return indexedServices(index, path, cfg).map(function (service) { return viewRow(service.row, service.kind, state, cfg, index); });
 }
 
-function overview(state, cfg) {
-    var index = serviceIndex(state, cfg);
-    var ports = rows(state, "Localhost", "", "all", cfg, index);
-    var containers = cfg.dockerEnabled ? state.containers || [] : [];
-    var projects = rows(state, "Projects", "", "all", cfg, index);
-    var tools = state.tools || [];
-    var favorites = projects.filter(function (p) { return p.favorite; });
-    var exposed = ports.filter(function (p) { return p.exposure !== "localhost"; });
-    return {
-        listening: {total:ports.length, exposed:exposed.length},
-        containers: {running:containers.filter(function (c) { return c.state === "running"; }).length, total:containers.length,
-            unhealthy:containers.filter(function (c) { return c.health === "unhealthy"; }).length},
-        databases:rows(state, "Databases", "", "all", cfg, index).length,
-        projects:{total:projects.length, favorites:favorites.length},
-        aiTools:{available:tools.filter(function (t) { return t.available; }).length, total:tools.length},
-        favorites:favorites.slice(0, 5), exposed:exposed.slice(0, 5)
-    };
-}
 
 function rawRow(view) {
     if (view && typeof view.raw === "string") {
@@ -746,7 +770,6 @@ function availableActions(view, cfg, state) {
             if (row.state !== "running" && row.state !== "restarting" && row.state !== "paused") add("start", "Start", "u");
             else { add("stop", "Stop", "x", true, true); add("restart", "Restart", "R", true, true); }
         }
-        add("logs", "Logs", "→");
         (row.publishedPorts || []).forEach(function (p) {
             var target = url(Object.assign({}, p, {database:null}), "http");
             if (target) add("open", "Open :" + p.port, "", false, false, {url:target, raw:JSON.stringify(Object.assign({}, p, {database:null}))});
@@ -755,7 +778,7 @@ function availableActions(view, cfg, state) {
     if (view.kind === "port" && canManage(view, cfg)) add("terminate", "Stop process", "x", true, true);
     if (view.kind === "project") {
         add("terminal", "Terminal", "t"); add("editor", "Editor", "e"); add("files", "Files", "f");
-        add("copy", "Copy path", "c"); add("favorite", view.favorite ? "Unfavorite" : "Favorite", "F"); add("ai", "AI tools", "a");
+        add("copy", "Copy path", "c"); add("ai", "AI tools", "a");
     }
     return output;
 }
@@ -796,10 +819,3 @@ function confirmText(op, view) {
     return (op === "restart" ? "Restart" : "Stop") + " container “" + row.name + "”?";
 }
 
-function toggleFavorite(cfg, path) {
-    var favorites = lines(cfg.favoriteProjects);
-    var index = favorites.indexOf(path);
-    if (index >= 0) favorites.splice(index, 1);
-    else if (validPath(path) && favorites.length < 128) favorites.push(path);
-    return favorites.join("\n");
-}

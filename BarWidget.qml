@@ -33,6 +33,9 @@ Ui.BarWidget {
             running: false
         })
     property var operationJob: null
+    // Set from handlers rather than bound: a binding over inventory and settings re-entered
+    // itself while the host was assigning settings and logged a binding loop.
+    property string tooltip: Model.displayName
     readonly property string actionsPath: decodeURIComponent(String(Qt.resolvedUrl("backend/actions.py")).replace(/^file:\/\//, ""))
     readonly property bool busy: job !== null
     readonly property bool opened: panelLoader.item ? panel.opened === true : false
@@ -74,6 +77,10 @@ Ui.BarWidget {
         var updated = Object.assign({}, errors);
         updated[scope] = value;
         errors = updated;
+    }
+
+    function updateTooltip() {
+        tooltip = hasError ? Model.displayName + "\n" + errorText : Model.displayName + " · " + Model.summary(inventory, cfg);
     }
 
     function notify(text, urgent) {
@@ -375,7 +382,13 @@ Ui.BarWidget {
             clearLogs();
         }
     }
-    Component.onCompleted: Qt.callLater(poll)
+    onInventoryChanged: Qt.callLater(updateTooltip)
+    onCfgChanged: Qt.callLater(updateTooltip)
+    onErrorTextChanged: Qt.callLater(updateTooltip)
+    Component.onCompleted: {
+        Qt.callLater(updateTooltip);
+        Qt.callLater(poll);
+    }
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -552,7 +565,7 @@ Ui.BarWidget {
         bar: root.bar
         text: Model.icon
         active: root.hasError
-        tooltipText: root.hasError ? Model.displayName + "\n" + root.errorText : Model.displayName + " · " + Model.summary(root.inventory, root.cfg)
+        tooltipText: root.tooltip
         onPressed: function (buttonCode) {
             if (buttonCode === Qt.LeftButton)
                 root.toggle();

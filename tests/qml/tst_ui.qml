@@ -230,7 +230,7 @@ TestCase {
             visibleTabs: "Docker"
         };
         form.load();
-        compare(form.tabs.join(","), "Overview,Docker,Projects,Tools");
+        compare(form.tabs.join(","), "Docker,Projects,Tools");
     }
 
     function test_legacyImportPreservesDashboardOnlySettings() {
@@ -239,7 +239,6 @@ TestCase {
             projectRoots: "/work",
             terminal: "kitty",
             managementEnabled: true,
-            favoriteProjects: "/work/app",
             customTools: "Aider | aider"
         };
         form.legacy = {
@@ -255,7 +254,7 @@ TestCase {
         const value = saved.signalArguments[0][0];
         compare(value.projectRoots, "/work");
         compare(value.terminal, "kitty");
-        compare(value.favoriteProjects, "/work/app");
+        compare(value.favoriteProjects, undefined);
         compare(value.managementEnabled, true);
         saved.clear();
     }
