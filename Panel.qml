@@ -39,7 +39,7 @@ Ui.Panel {
     })
     readonly property var entries: listModel
     property string selectedId: ""
-    property string composeParentId: ""
+    property string detailParentId: ""
     property var selectedRow: ({})
     property double now: Date.now() / 1000
 
@@ -105,7 +105,7 @@ Ui.Panel {
             launchTool(visibleRows[index]);
             return;
         }
-        composeParentId = "";
+        detailParentId = "";
         selectedRow = visibleRows[index];
         selectedId = selectedRow.id;
         now = Date.now() / 1000;
@@ -113,14 +113,15 @@ Ui.Panel {
     }
 
     function openRelated(row) {
-        if (selectedRow.kind === "compose") {
-            composeParentId = selectedId;
+        const targetTab = row.kind === "container" ? "Docker" : "Localhost";
+        if (selectedRow.kind === "compose" || cfg.tabs.indexOf(targetTab) < 0) {
+            detailParentId = selectedId;
             selectedId = row.id;
             selectedRow = row;
             focusKeys();
             return;
         }
-        selectTab(row.kind === "container" ? "Docker" : "Localhost");
+        selectTab(targetTab);
         const compose = row.kind === "container" ? Model.rawRow(row).compose : "";
         const id = compose ? "compose:" + compose : row.id;
         const index = visibleRows.findIndex(function (entry) {
@@ -135,14 +136,17 @@ Ui.Panel {
         const listRow = visibleRows.find(function (row) {
             return row.id === id;
         });
-        if (listRow || !composeParentId)
+        if (listRow || !detailParentId)
             return listRow;
         const parent = visibleRows.find(function (row) {
-            return row.id === root.composeParentId;
+            return row.id === root.detailParentId;
         });
-        return parent ? Model.composeMembers(inventory, parent.title, cfg, strings).find(function (row) {
+        if (!parent)
+            return null;
+        const services = parent.kind === "project" ? Model.projectServices(inventory, parent.projectPath, cfg, null, strings) : Model.composeMembers(inventory, parent.title, cfg, strings);
+        return services.find(function (row) {
             return row.id === id;
-        }) : null;
+        });
     }
 
     function launchTool(row) {
@@ -225,9 +229,9 @@ Ui.Panel {
             view = "detail";
             return;
         }
-        if (composeParentId) {
-            const parent = detailRow(composeParentId);
-            composeParentId = "";
+        if (detailParentId) {
+            const parent = detailRow(detailParentId);
+            detailParentId = "";
             if (parent) {
                 selectedId = parent.id;
                 selectedRow = parent;
@@ -244,7 +248,7 @@ Ui.Panel {
         var leaving = view === "settings";
         if (view === "logs")
             back();
-        composeParentId = "";
+        detailParentId = "";
         back();
         if (!leaving)
             view = "settings";
@@ -253,7 +257,7 @@ Ui.Panel {
     function selectTab(name) {
         if (cfg.tabs.indexOf(name) < 0)
             return;
-        composeParentId = "";
+        detailParentId = "";
         back();
         view = "list";
         tab = name;

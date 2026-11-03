@@ -45,6 +45,7 @@
   "detail.openBrowser": "Open in browser",
   "detail.openHttp": "Open as HTTP",
   "detail.openHttps": "Open as HTTPS",
+  "detail.systemDatabase": "Managed by the system; stop it with systemctl.",
   "detail.viewLogs": "View logs",
   "docker.disabled": "Docker integration is turned off in settings.",
   "docker.unknown": "unknown reason",

@@ -290,7 +290,7 @@ function listeners(state, includeDocker) {
                 byId[port.id] = row;
             }
             if (row.containerIds.indexOf(container.id) === -1) row.containerIds.push(container.id);
-            row.containerName = container.name;
+            if (row.containerIds[0] === container.id) row.containerName = container.name;
             if (!row.database) row.database = container.database || null;
         });
     });
@@ -346,7 +346,7 @@ function containerTone(row) {
 // One list row. Every field is a primitive so it can live in a QML ListModel.
 function viewRow(row, kind, state, cfg, index, strings) {
     var view = { id: row.id, kind: kind, lead: "", title: "", subtitle: "", badge: "", tone: "dim",
-        rowState: row.state || "", exposure: "", url: "", copyText: "", containerId: "", port: row.port || 0 };
+        rowState: row.state || "", exposure: "", url: "", copyText: "", containerId: "", containerName: "", port: row.port || 0 };
     index = index || (state ? serviceIndex(state, cfg || config({})) : null);
     var associations = index ? kind === "container" ? index.containers : index.ports : {};
     view.projectPath = kind === "project" ? row.path : associations[row.id] !== undefined ? associations[row.id]
@@ -381,9 +381,12 @@ function viewRow(row, kind, state, cfg, index, strings) {
     } else if (kind === "port") {
         var address = addressText(row);
         view.lead = String(row.port);
-        view.title = row.containerName || (known(row.process) ? row.process : row.database || translate(strings, "row.unknownProcess", "Unknown process"));
-        view.subtitle = [row.address, row.database, row.containerName ? translate(strings, "row.container", "container")
-            : row.pid ? "pid " + row.pid : null, row.containerName || !known(row.owner) ? null : row.owner]
+        view.containerId = (row.containerIds || [])[0] || "";
+        var container = index && index.containerRows[view.containerId];
+        view.containerName = (container && container.name) || row.containerName || "";
+        view.title = view.containerName || (known(row.process) ? row.process : row.database || translate(strings, "row.unknownProcess", "Unknown process"));
+        view.subtitle = [row.address, row.database, isPublishedPort(row) ? translate(strings, "row.container", "container")
+            : row.pid ? "pid " + row.pid : null, isPublishedPort(row) || !known(row.owner) ? null : row.owner]
             .filter(known).join(" · ");
         view.exposure = row.exposure || "";
         view.badge = row.exposure === "localhost" ? translate(strings, "row.local", "local")
@@ -391,7 +394,6 @@ function viewRow(row, kind, state, cfg, index, strings) {
         view.tone = row.exposure === "localhost" ? "info" : row.exposure === "all" ? "urgent" : "warn";
         view.url = url(row);
         view.copyText = view.url || address;
-        view.containerId = (row.containerIds || [])[0] || "";
         words = [address, row.process, row.cwd];
     } else if (kind === "compose") {
         view.title = row.name;
@@ -460,7 +462,7 @@ function facts(view, now, strings) {
         add("fact.project", "Project", view.projectPath);
         add("fact.workingDirectory", "Working directory", row.cwd);
         if (row.startedAt) add("fact.runningFor", "Running for", duration(now - row.startedAt));
-        add("fact.container", "Container", row.containerName);
+        add("fact.container", "Container", view.containerName || row.containerName);
         add("fact.database", "Database", row.database);
         add("fact.containerPort", "Container port", row.targetPort);
     } else if (view.kind === "container") {
@@ -891,13 +893,34 @@ function validComposeSelection(row) {
         && row.memberIds.every(function (id) { return typeof id === "string" && /^[a-f0-9]{64}$/.test(id); });
 }
 
+function isPublishedPort(row) {
+    return !!row.containerName || !!(row.containerIds || []).length;
+}
+
+function singleContainerId(view, row) {
+    var id = view.kind === "port" ? (row.containerIds || [])[0]
+        : view.kind === "container" || !view.kind ? row.id : "";
+    return typeof id === "string" && /^[a-f0-9]{64}$/.test(id) ? id : "";
+}
+
+function canTerminateProcess(row) {
+    return row.ownedByUser === true && !isPublishedPort(row)
+        && Number.isInteger(row.pid) && row.pid >= 2 && row.pid <= 4194304
+        && typeof row.startTicks === "string" && /^\d{1,20}$/.test(row.startTicks);
+}
+
+function isSystemDatabase(view) {
+    if (view.kind !== "port") return false;
+    var row = rawRow(view);
+    return !!row.database && row.ownedByUser === false && !isPublishedPort(row);
+}
+
 function canManage(view, cfg) {
     if (!cfg.managementEnabled || !view) return false;
     var row = rawRow(view);
     if (view.kind === "compose") return cfg.dockerEnabled && validComposeSelection(row);
-    if (view.kind === "container") return cfg.dockerEnabled && /^[a-f0-9]{64}$/.test(row.id);
-    return view.kind === "port" && row.ownedByUser === true && !row.containerName && !(row.containerIds || []).length
-        && Number.isInteger(row.pid) && row.pid >= 2 && row.pid <= 4194304 && typeof row.startTicks === "string" && /^\d{1,20}$/.test(row.startTicks || "");
+    if (singleContainerId(view, row)) return cfg.dockerEnabled;
+    return view.kind === "port" && canTerminateProcess(row);
 }
 
 function availableActions(view, cfg, state, strings) {
@@ -911,17 +934,21 @@ function availableActions(view, cfg, state, strings) {
         add("compose-stop", translate(strings, "action.composeStop", "Stop all"), "x", true, true);
         add("compose-restart", translate(strings, "action.composeRestart", "Restart all"), "R", true, true);
     }
-    if (view.kind === "container" && cfg.dockerEnabled) {
-        if (canManage(view, cfg)) {
-            if (row.state !== "running" && row.state !== "restarting" && row.state !== "paused") add("start", translate(strings, "action.start", "Start"), "u");
-            else { add("stop", translate(strings, "action.stop", "Stop"), "x", true, true); add("restart", translate(strings, "action.restart", "Restart"), "R", true, true); }
+    if (cfg.managementEnabled && cfg.dockerEnabled && singleContainerId(view, row)) {
+        if (view.kind === "container" && row.state !== "running" && row.state !== "restarting" && row.state !== "paused") {
+            add("start", translate(strings, "action.start", "Start"), "u");
+        } else {
+            add("stop", translate(strings, "action.stop", "Stop"), "x", true, true);
+            add("restart", translate(strings, "action.restart", "Restart"), "R", true, true);
         }
+    }
+    if (view.kind === "container" && cfg.dockerEnabled) {
         (row.publishedPorts || []).forEach(function (p) {
             var target = url(Object.assign({}, p, {database:null}), "http");
             if (target) add("open", translate(strings, "action.open", "Open :%1", [p.port]), "", false, false, {url:target, raw:JSON.stringify(Object.assign({}, p, {database:null}))});
         });
     }
-    if (view.kind === "port" && canManage(view, cfg)) add("terminate", translate(strings, "action.terminate", "Stop process"), "x", true, true);
+    if (view.kind === "port" && cfg.managementEnabled && canTerminateProcess(row)) add("terminate", translate(strings, "action.terminate", "Stop process"), "x", true, true);
     if (view.kind === "project") {
         add("terminal", translate(strings, "action.terminal", "Terminal"), "t"); add("editor", translate(strings, "action.editor", "Editor"), "e"); add("files", translate(strings, "action.files", "Files"), "f");
         add("copy", translate(strings, "action.copy", "Copy path"), "c"); add("ai", translate(strings, "action.ai", "AI tools"), "a");
@@ -937,10 +964,12 @@ function actionArgs(op, view, cfg, context) {
     if (["compose-start", "compose-stop", "compose-restart"].indexOf(composeOp) >= 0)
         return view.kind === "compose" && validComposeSelection(row) ? ["docker-" + composeOp, "--project=" + row.name]
             .concat(row.memberIds.map(function (id) { return "--container-id=" + id; })) : null;
-    if (["start", "stop", "restart"].indexOf(op) >= 0) return /^[a-f0-9]{64}$/.test(row.id) ? ["docker-" + op, "--container-id=" + row.id] : null;
+    if (["start", "stop", "restart"].indexOf(op) >= 0) {
+        var id = singleContainerId(view, row);
+        return id && !(view.kind === "port" && op === "start") ? ["docker-" + op, "--container-id=" + id] : null;
+    }
     if (op === "terminate") {
-        if (!Number.isInteger(row.pid) || row.pid < 2 || row.pid > 4194304 || typeof row.startTicks !== "string" || !/^\d{1,20}$/.test(row.startTicks || "")
-                || !Number.isInteger(row.port) || row.port < 1 || row.port > 65535) return null;
+        if (!canTerminateProcess(row) || !Number.isInteger(row.port) || row.port < 1 || row.port > 65535) return null;
         return ["process-terminate", "--pid=" + row.pid, "--start-ticks=" + row.startTicks, "--port=" + row.port];
     }
     if (["terminal", "editor", "files", "launch-tool"].indexOf(op) < 0) return null;
@@ -977,8 +1006,9 @@ function confirmText(op, view, strings) {
         return known(row.process)
             ? translate(strings, "confirm.terminate", "Send SIGTERM to %1 (PID %2) on port %3? It will not be force-killed.", [row.process, row.pid, row.port])
             : translate(strings, "confirm.terminateUnknown", "Send SIGTERM to PID %1 on port %2? It will not be force-killed.", [row.pid, row.port]);
+    var name = view.kind === "port" ? view.containerName || row.containerName || singleContainerId(view, row).slice(0, 12) : row.name;
     return op === "restart"
-        ? translate(strings, "confirm.restart", "Restart container “%1”?", [row.name])
-        : translate(strings, "confirm.stop", "Stop container “%1”?", [row.name]);
+        ? translate(strings, "confirm.restart", "Restart container “%1”?", [name])
+        : translate(strings, "confirm.stop", "Stop container “%1”?", [name]);
 }
 

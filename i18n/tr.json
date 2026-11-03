@@ -41,6 +41,7 @@
   "detail.openBrowser": "Tarayıcıda aç",
   "detail.openHttp": "HTTP ile aç",
   "detail.openHttps": "HTTPS ile aç",
+  "detail.systemDatabase": "Bu süreci sistem yönetiyor. Durdurmak için systemctl kullanın.",
   "detail.viewLogs": "Günlükleri göster",
   "docker.disabled": "Docker entegrasyonu ayarlarda kapalı.",
   "docker.unknown": "neden bilinmiyor",

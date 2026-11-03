@@ -416,7 +416,7 @@ test('management is opt in and never terminates container or unowned listeners',
     assert.ok(M.availableActions(M.viewRow({...container(),state:'exited'},'container'),cfg,{}).some(a=>a.id==='start'));
     const p=M.viewRow({...port(),ownedByUser:true,startTicks:'123'},'port');
     assert.equal(M.canManage(p,cfg),true); assert.equal(M.canManage(p,M.config({})),false);
-    for (const extra of [{ownedByUser:false},{containerName:'web'},{containerIds:[cid]},{pid:null},{startTicks:null}])
+    for (const extra of [{ownedByUser:false},{containerName:'web'},{pid:null},{startTicks:null}])
         assert.equal(M.canManage(M.viewRow({...port(),ownedByUser:true,startTicks:'123',...extra},'port'),cfg),false);
     assert.deepEqual(clone(M.availableActions(M.viewRow(project(),'project'),cfg,{}).map(a=>a.key)),['t','e','f','c','a']);
     assert.equal(M.availableActions(c,cfg,{}).filter(a=>a.id==='logs').length,0);
@@ -687,4 +687,50 @@ test('Compose ports cannot report phantom conflicts without Docker inventory', (
     assert.deepEqual(clone(M.portConflicts(state, project, M.config({dockerEnabled:false}))), [
         {port:3001, source:'.env', holder:'vite'}
     ]);
+});
+
+test('published ports in Ports and DBs manage the first container and never stop its process', () => {
+    const first = {...container(), name:'postgres-main', database:'PostgreSQL'};
+    const second = {...first, id:'b'.repeat(64), name:'postgres-other'};
+    const published = {...port(), ownedByUser:true, startTicks:'123'};
+    const state = {ports:[published], containers:[first, second]};
+    const cfg = M.config({managementEnabled:true});
+    for (const tab of ['Localhost', 'Databases']) {
+        const [row] = M.rows(state, tab, '', 'all', cfg);
+        assert.equal(row.kind, 'port');
+        assert.deepEqual(clone(M.availableActions(row, cfg, state).map(a => [a.id, a.key, a.confirm])),
+            [['stop', 'x', true], ['restart', 'R', true]]);
+        assert.deepEqual(clone(M.availableActions(row, M.config({}), state)), []);
+        assert.deepEqual(clone(M.availableActions(row, M.config({managementEnabled:true, dockerEnabled:false}), state)), []);
+        for (const action of ['stop', 'restart'])
+            assert.deepEqual(clone(M.actionArgs(action, row, cfg)), ['docker-' + action, '--container-id=' + cid]);
+        assert.equal(M.actionArgs('terminate', row, cfg), null);
+        assert.equal(M.actionArgs('start', row, cfg), null);
+        assert.equal(M.confirmText('stop', row), 'Stop container “postgres-main”?');
+    }
+});
+
+test('container confirmation resolves the name when a port row supplies only the ID', () => {
+    const cfg = M.config({managementEnabled:true});
+    const row = M.viewRow({...port(), containerIds:[cid]}, 'port',
+        {containers:[{...container(), name:'postgres-dev', publishedPorts:[]}]}, cfg);
+    assert.equal(M.confirmText('restart', row), 'Restart container “postgres-dev”?');
+});
+
+test('database containers and local database processes retain their own management actions', () => {
+    const cfg = M.config({managementEnabled:true});
+    const exited = {...container(), state:'exited', database:'PostgreSQL', publishedPorts:[]};
+    const foreign = {...port(5432), database:'PostgreSQL', ownedByUser:false, startTicks:'123'};
+    const owned = {...foreign, ...port(5433), database:'PostgreSQL', ownedByUser:true};
+    const state = {ports:[owned, foreign], containers:[exited]};
+    const details = M.rows(state, 'Databases', '', 'all', cfg);
+    const row = details.find(view => view.kind === 'container');
+    assert.deepEqual(clone(M.availableActions(row, cfg, state).map(a => a.id)), ['start']);
+    assert.deepEqual(clone(M.actionArgs('start', row, cfg)), ['docker-start', '--container-id=' + cid]);
+    const unmanaged = details.find(view => view.id === foreign.id);
+    assert.deepEqual(clone(M.availableActions(unmanaged, cfg, state)), []);
+    assert.equal(M.isSystemDatabase(unmanaged), true);
+    const manageable = details.find(view => view.id === owned.id);
+    assert.deepEqual(clone(M.availableActions(manageable, cfg, state).map(a => a.id)), ['terminate']);
+    assert.equal(M.isSystemDatabase(manageable), false);
 });

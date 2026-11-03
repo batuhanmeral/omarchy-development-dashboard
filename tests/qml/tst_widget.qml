@@ -336,6 +336,150 @@ TestCase {
         p.panel.openDetail(0);
         return p;
     }
+    function test_publishedContainerPortOffersConfirmedDockerActions_data() {
+        return [
+            {
+                tag: "Ports",
+                tab: "Localhost"
+            },
+            {
+                tag: "DBs",
+                tab: "Databases"
+            }
+        ];
+    }
+
+    function test_publishedContainerPortOffersConfirmedDockerActions(data) {
+        const p = openPanel();
+        p.widget.settings = {
+            dockerEnabled: true,
+            managementEnabled: true
+        };
+        p.widget.inventory = {
+            containers: [
+                {
+                    id: cid,
+                    name: "postgres-dev",
+                    database: "PostgreSQL",
+                    state: "running",
+                    publishedPorts: [port(5432, "postgres")]
+                }
+            ]
+        };
+        p.panel.selectTab(data.tab);
+        p.panel.openDetail(0);
+        compare(p.panel.selectedRow.kind, "port");
+        verify(findChild(p.panel, "detailAction-stop") !== null);
+        verify(findChild(p.panel, "detailAction-restart") !== null);
+        compare(findChild(p.panel, "detailAction-terminate"), null);
+        keyClick(Qt.Key_X);
+        const dialog = findChild(p.panel, "confirmDialog");
+        compare(dialog.message, 'Stop container “postgres-dev”?');
+        const operation = findChild(p.widget, "operation");
+        compare(operation.launches, 0);
+        keyClick(Qt.Key_Y);
+        compare(operation.command.slice(-2), ["docker-stop", "--container-id=" + cid]);
+        p.widget.settings = {
+            dockerEnabled: true,
+            managementEnabled: false
+        };
+        tryVerify(function () {
+            return findChild(p.panel, "detailAction-stop") === null;
+        });
+        compare(findChild(p.panel, "detailAction-restart"), null);
+    }
+
+    function test_stoppedAndSystemDatabasesShowAppropriateActions() {
+        const p = openPanel();
+        suite.visible = true;
+        p.panel.parent.visible = true;
+        p.widget.settings = {
+            dockerEnabled: true,
+            managementEnabled: true
+        };
+        const database = port(5432, "postgres");
+        database.database = "PostgreSQL";
+        database.ownedByUser = false;
+        p.widget.inventory = {
+            ports: [database],
+            containers: [
+                {
+                    id: cid,
+                    name: "postgres-dev",
+                    database: "PostgreSQL",
+                    state: "exited",
+                    publishedPorts: []
+                }
+            ]
+        };
+        p.panel.selectTab("Databases");
+        p.panel.openDetail(0);
+        const hint = findChild(p.panel, "systemDatabaseHint");
+        verify(hint !== null && hint.visible);
+        compare(hint.text, "Managed by the system; stop it with systemctl.");
+        Commons.I18n.language = "tr";
+        tryVerify(function () {
+            return hint.text === "Bu süreci sistem yönetiyor. Durdurmak için systemctl kullanın.";
+        });
+        Commons.I18n.language = "en";
+        compare(findChild(p.panel, "detailAction-terminate"), null);
+        compare(findChild(p.panel, "detailAction-stop"), null);
+        p.panel.openDetail(1);
+        verify(!hint.visible);
+        verify(findChild(p.panel, "detailAction-start") !== null);
+        keyClick(Qt.Key_U);
+        compare(findChild(p.widget, "operation").command.slice(-2), ["docker-start", "--container-id=" + cid]);
+    }
+
+    function test_projectContainerServiceOpensDetailWithDockerActions_data() {
+        return [
+            {
+                tag: "Docker visible",
+                tabs: "Docker,Projects"
+            },
+            {
+                tag: "Docker hidden",
+                tabs: "Projects"
+            }
+        ];
+    }
+
+    function test_projectContainerServiceOpensDetailWithDockerActions(data) {
+        const p = openPanel();
+        p.widget.settings = {
+            settingsVersion: 2,
+            visibleTabs: data.tabs,
+            dockerEnabled: true,
+            managementEnabled: true,
+            projectRoots: "/work"
+        };
+        p.widget.inventory = {
+            projects: [projectRow()],
+            containers: [
+                {
+                    id: cid,
+                    name: "app-db",
+                    state: "running",
+                    compose: "app",
+                    composeDir: "/work/app",
+                    publishedPorts: []
+                }
+            ]
+        };
+        p.panel.selectTab("Projects");
+        p.panel.openDetail(0);
+        const service = findChild(p.panel, "projectService");
+        verify(service !== null);
+        service.click();
+        compare(p.panel.selectedRow.id, cid);
+        verify(findChild(p.panel, "detailAction-stop") !== null);
+        verify(findChild(p.panel, "detailAction-restart") !== null);
+        if (data.tabs === "Projects") {
+            p.panel.back();
+            compare(p.panel.selectedRow.kind, "project");
+        }
+    }
+
     function test_composeGroupOpensMemberAndConfirmsBulkStop() {
         const p = dockerPanel(true);
         p.widget.inventory = {

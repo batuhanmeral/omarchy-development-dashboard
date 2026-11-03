@@ -143,6 +143,15 @@ Column {
         }
     }
 
+    Label {
+        objectName: "systemDatabaseHint"
+        width: parent.width
+        visible: root.panel.view === "detail" && Model.isSystemDatabase(root.panel.selectedRow)
+        text: root.strings.t("detail.systemDatabase")
+        wrapMode: Text.WordWrap
+        color: root.panel.dim
+    }
+
     Flow {
         width: parent.width
         visible: root.panel.view === "detail"
@@ -199,6 +208,7 @@ Column {
             model: Model.availableActions(root.panel.selectedRow, root.panel.cfg, root.panel.inventory, root.strings)
             Ui.Button {
                 required property var modelData
+                objectName: "detailAction-" + modelData.id
                 text: modelData.label + (modelData.key ? " (" + modelData.key + ")" : "")
                 bordered: true
                 foreground: modelData.destructive ? root.panel.urgent : root.panel.foreground
@@ -221,7 +231,7 @@ Column {
             model: serviceList.services
             Ui.Button {
                 required property var modelData
-                objectName: root.panel.selectedRow.kind === "compose" ? "composeMember" : ""
+                objectName: root.panel.selectedRow.kind === "compose" ? "composeMember" : "projectService"
                 width: parent.width
                 text: (modelData.lead ? ":" + modelData.lead + " · " : "") + modelData.title + " · " + modelData.badge
                 bordered: true
