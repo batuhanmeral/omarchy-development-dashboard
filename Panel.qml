@@ -18,7 +18,7 @@ Ui.Panel {
     property Item anchorItem: null
     property var hostWidget: null
 
-    property string tab: "Localhost"
+    property string tab: ""
     property string query: ""
     property string filter: "all"
     // "list", "detail", "logs" or "settings".
@@ -58,6 +58,7 @@ Ui.Panel {
     readonly property bool sampled: hostWidget ? hostWidget.lastUpdate > 0 || hostWidget.hasError : false
     readonly property var visibleRows: Model.rows(inventory, tab, query, filter, cfg)
     readonly property string dockerNotice: Model.dockerNotice(inventory, errors, cfg)
+    readonly property string scopeNotice: tab === "Projects" ? errors.projects || "" : tab === "Tools" ? errors.tools || "" : ["Docker", "Images", "Databases"].indexOf(tab) >= 0 ? dockerNotice : ""
     readonly property var selectedFacts: selectedId ? Model.facts(selectedRow, now) : []
     readonly property string updatedText: hostWidget && hostWidget.lastUpdate > 0 ? "Updated " + new Date(hostWidget.lastUpdate).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat) + " · " : ""
     readonly property bool canOpenAs: selectedRow.kind === "port" && !selectedRow.url && selectedRawRow.database === null
@@ -250,6 +251,12 @@ Ui.Panel {
             selectTab(cfg.tabs[0]);
     }
     onVisibleRowsChanged: {
+        if (confirmation && !visibleRows.some(function (row) {
+            return row.id === root.confirmation.row.id;
+        })) {
+            confirmation = null;
+            focusKeys();
+        }
         Model.sync(listModel, visibleRows);
         cursor = Math.max(0, Math.min(visibleRows.length - 1, cursor));
         if (!selectedId)
@@ -332,7 +339,8 @@ Ui.Panel {
                 Connections {
                     target: root
                     function onViewChanged() {
-                        keys.forceActiveFocus();
+                        if (!root.confirming)
+                            keys.forceActiveFocus();
                     }
                 }
 

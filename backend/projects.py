@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+import stat
+import time
 from pathlib import Path
 from typing import Any
 
-from collector import CollectionError, CommandRunner, clean
+from collector import CollectionError, CommandFailed, CommandRunner, clean
 
 FORBIDDEN = (
     "/proc",
@@ -23,6 +25,9 @@ FORBIDDEN = (
     "/lib64",
     "/var/lib/docker",
 )
+MAX_VISITED_DIRECTORIES = 20000
+SCAN_BUDGET = 8.0
+SCAN_STOPPED = "Project scan stopped early (limit reached); showing partial results."
 PRUNED = {"node_modules", "vendor", "target", "build", "dist", "venv", "__pycache__"}
 
 
@@ -38,8 +43,11 @@ def validate_root(path: str) -> Path:
             raise ValueError
         path.encode("utf-8", errors="strict")
         resolved = Path(path).resolve()
+        str(resolved).encode("utf-8", errors="strict")
         if (
-            resolved == Path("/")
+            len(str(resolved)) > 4096
+            or any(ch in str(resolved) for ch in "\0\n\r")
+            or resolved == Path("/")
             or any(resolved == Path(root) or Path(root) in resolved.parents for root in FORBIDDEN)
             or not resolved.is_dir()
         ):
@@ -49,17 +57,31 @@ def validate_root(path: str) -> Path:
     return resolved
 
 
+def read_git_file(path: Path) -> str | None:
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            return None
+        return os.read(fd, 4096).decode("utf-8", errors="strict")
+    finally:
+        os.close(fd)
+
+
 def head_branch(project: Path) -> tuple[str | None, bool]:
     try:
         gitdir = project / ".git"
-        if gitdir.is_file():
-            with gitdir.open("r", encoding="utf-8") as stream:
-                pointer = stream.read(4097)
-            if len(pointer.encode("utf-8")) > 4096 or not pointer.startswith("gitdir: "):
+        if not gitdir.is_dir():
+            pointer = read_git_file(gitdir)
+            if pointer is None or not pointer.startswith("gitdir: "):
                 return None, False
             gitdir = project / pointer[8:].strip()
-        with (gitdir / "HEAD").open("r", encoding="utf-8") as stream:
-            head = stream.read(4097).strip()
+        if not gitdir.is_dir():
+            return None, False
+        raw = read_git_file(gitdir / "HEAD")
+        if raw is None:
+            return None, False
+        head = raw.strip()
         if head.startswith("ref: refs/heads/"):
             return clean(head[16:], 256) or None, False
         if re.fullmatch(r"[a-fA-F0-9]{40}|[a-fA-F0-9]{64}", head):
@@ -83,30 +105,50 @@ def unknown_status(project: Path) -> dict[str, Any]:
     )
 
 
-def discover(roots: list[str], depth: int, limit: int = 512) -> tuple[list[dict[str, Any]], int]:
+def discover(
+    roots: list[str],
+    depth: int,
+    limit: int = 512,
+    *,
+    errors: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     if not 1 <= depth <= 4 or len(roots) > 16 or not 1 <= limit <= 512:
         raise CollectionError("project scan limit exceeded")
     projects: list[dict[str, Any]] = []
     seen: set[Path] = set()
     skipped = 0
+    visited = 0
+    stopped = False
+    deadline = time.monotonic() + SCAN_BUDGET
+
+    def expired() -> bool:
+        nonlocal stopped
+        if time.monotonic() >= deadline:
+            stopped = True
+        return stopped
 
     def visit(path: Path, root: Path, level: int) -> None:
-        nonlocal skipped
-        if len(projects) >= limit:
+        nonlocal skipped, visited, stopped
+        if len(projects) >= limit or expired():
             return
         try:
+            if any(ch in str(path) for ch in "\0\n\r"):
+                skipped += 1
+                return
             str(path).encode("utf-8", errors="strict")
             real = path.resolve()
             if real in seen:
                 return
+            if visited >= MAX_VISITED_DIRECTORIES:
+                stopped = True
+                return
+            visited += 1
             seen.add(real)
-            with os.scandir(path) as entries:
-                children = sorted(entries, key=lambda entry: entry.name)
-            if any(
-                entry.name == ".git"
-                and (entry.is_file(follow_symlinks=False) or entry.is_dir(follow_symlinks=False))
-                for entry in children
-            ):
+            try:
+                marker = (path / ".git").lstat()
+            except FileNotFoundError:
+                marker = None
+            if marker and (stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)):
                 projects.append(
                     dict(
                         id="project:" + str(real),
@@ -119,27 +161,58 @@ def discover(roots: list[str], depth: int, limit: int = 512) -> tuple[list[dict[
                 return
             if level >= depth:
                 return
-            for entry in children:
-                if (
-                    not entry.name.startswith(".")
-                    and entry.name not in PRUNED
-                    and entry.is_dir(follow_symlinks=False)
-                ):
-                    visit(Path(entry.path), root, level + 1)
+            # Stream entries so a huge directory cannot consume unbounded time or memory.
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if len(projects) >= limit or expired():
+                        return
+                    if (
+                        not entry.name.startswith(".")
+                        and entry.name not in PRUNED
+                        and entry.is_dir(follow_symlinks=False)
+                    ):
+                        visit(Path(entry.path), root, level + 1)
         except UnicodeError:
             skipped += 1
         except (OSError, RuntimeError):
             pass
 
     for value in roots:
+        if expired():
+            break
         root = validate_root(value)
         visit(root, root, 0)
+    if stopped and errors is not None:
+        errors.append(SCAN_STOPPED)
     return projects, skipped
 
 
 def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
     result = unknown_status(project)
+    env = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
     try:
+        try:
+            configured = runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(project),
+                    "config",
+                    "--local",
+                    "--name-only",
+                    "--get-regexp",
+                    r"^(filter|include|includeif)\.",
+                ],
+                timeout=2,
+                env=env,
+            )
+        except CommandFailed as exc:
+            # git config exits 1, without stderr, when no key matches the expression.
+            if exc.returncode != 1 or exc.stderr:
+                raise
+            configured = ""
+        if configured.strip():
+            return result
         raw = runner.run(
             [
                 "git",
@@ -155,9 +228,10 @@ def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
                 "--branch",
                 "-z",
                 "--untracked-files=normal",
+                "--ignore-submodules=all",
             ],
             timeout=2,
-            env={"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+            env=env,
         )
         records = iter(raw.split("\0"))
         for record in records:

@@ -428,18 +428,18 @@ test('management is opt in and never terminates container or unowned listeners',
 
 test('actions use separate validated argv entries for every operation', () => {
     const cfg=M.config({projectRoots:'/work\n/home/me',terminal:'kitty',editor:'code --wait',customTools:'Test | tool | $(id)'});
-    for(const op of ['start','stop','restart']) assert.deepEqual(clone(M.actionArgs(op,container(),cfg,{})),['docker-'+op,'--container-id',cid]);
+    for(const op of ['start','stop','restart']) assert.deepEqual(clone(M.actionArgs(op,container(),cfg,{})),['docker-'+op,'--container-id='+cid]);
     assert.equal(M.actionArgs('stop',{id:';rm'},cfg,{}),null);
-    assert.deepEqual(clone(M.actionArgs('terminate',{...port(),ownedByUser:true,startTicks:'123'},cfg,{})),['process-terminate','--pid','100','--start-ticks','123','--port','3000']);
+    assert.deepEqual(clone(M.actionArgs('terminate',{...port(),ownedByUser:true,startTicks:'123'},cfg,{})),['process-terminate','--pid=100','--start-ticks=123','--port=3000']);
     for(const p of [{...port(),pid:1,startTicks:'1'}, {...port(),startTicks:'x'}]) assert.equal(M.actionArgs('terminate',p,cfg,{}),null);
-    const base=['--path','/work/project','--project-root','/work','--project-root','/home/me'];
-    assert.deepEqual(clone(M.actionArgs('terminal',project(),cfg,{})),['open-terminal',...base,'--terminal','kitty']);
-    assert.deepEqual(clone(M.actionArgs('editor',project(),cfg,{})),['open-editor',...base,'--editor','code --wait']);
+    const base=['--path=/work/project','--project-root=/work','--project-root=/home/me'];
+    assert.deepEqual(clone(M.actionArgs('terminal',project(),cfg,{})),['open-terminal',...base,'--terminal=kitty']);
+    assert.deepEqual(clone(M.actionArgs('editor',project(),cfg,{})),['open-editor',...base,'--editor=code --wait']);
     assert.deepEqual(clone(M.actionArgs('files',project(),cfg,{})),['open-files',...base]);
-    assert.deepEqual(clone(M.actionArgs('launch-tool',tool(),cfg,{path:'/work/project'})),['launch-tool',...base,'--tool','claude','--terminal','kitty','--custom-tool','Test | tool | $(id)']);
-    for(const p of ['relative','/work/../outside','/work/a\nfoo','/work2/app']) assert.equal(M.actionArgs('terminal',project(p),cfg,{}),null,p);
+    assert.deepEqual(clone(M.actionArgs('launch-tool',tool(),cfg,{path:'/work/project'})),['launch-tool',...base,'--tool=claude','--terminal=kitty','--custom-tool=Test | tool | $(id)']);
+    for(const p of ['relative','/work/../outside','/work/a\nfoo']) assert.equal(M.actionArgs('terminal',project(p),cfg,{}),null,p);
     const weird='/work/$(id);name';
-    assert.equal(M.actionArgs('terminal',project(weird),cfg,{})[2],weird);
+    assert.equal(M.actionArgs('terminal',project(weird),cfg,{})[1],'--path='+weird);
     assert.equal(M.actionArgs('evil',project(),cfg,{}),null);
 });
 
@@ -472,4 +472,64 @@ test('process start ticks retain their string identity at the frontend boundary'
     const numeric={...port(),ownedByUser:true,startTicks:123};
     assert.equal(M.canManage(M.viewRow(numeric,'port'),cfg),false);
     assert.equal(M.actionArgs('terminate',numeric,cfg,{}),null);
+});
+
+
+test('canonical project paths under symlink roots are authorized by the backend', () => {
+    const cfg=M.config({projectRoots:'/home/u/projects-link'});
+    for (const op of ['terminal','editor','files']) {
+        const args=M.actionArgs(op,project('/mnt/projects/app'),cfg,{});
+        assert.ok(args,op);
+        assert.ok(args.includes('--path=/mnt/projects/app'));
+        assert.ok(args.includes('--project-root=/home/u/projects-link'));
+    }
+    assert.ok(M.actionArgs('launch-tool',tool(),cfg,{path:'/mnt/projects/app'}));
+    assert.ok(M.actionArgs('terminal',project('/work2/app'),cfg,{}));
+    assert.equal(M.actionArgs('terminal',project('/mnt/projects/app'),{...cfg,projectRoots:'/proc'},{}),null);
+});
+
+test('option-shaped tool definitions and editor values stay attached to their option', () => {
+    const cfg=M.config({projectRoots:'/work',editor:'-foo',customTools:'-x|aider'});
+    const edit=M.actionArgs('editor',project(),cfg,{});
+    assert.ok(edit.includes('--editor=-foo'));
+    assert.ok(M.actionArgs('launch-tool',tool(),cfg,{path:'/work/project'}).includes('--custom-tool=-x|aider'));
+});
+
+test('512 projects and 60 listeners keep counts and project rows below 300ms', () => {
+    const state={projects:Array.from({length:512},(_,i)=>project('/work/project-'+i)),ports:Array.from({length:60},(_,i)=>({...port(8000+i),cwd:'/work/project-'+i+'/src'}))};
+    const cfg=M.config({projectRoots:'/work'});
+    const before=performance.now();
+    const counts=M.counts(state,cfg);
+    const projects=M.rows(state,'Projects','','all',cfg);
+    const elapsed=performance.now()-before;
+    console.log('dashboard 512/60 counts + project rows: '+elapsed.toFixed(2)+' ms');
+    assert.equal(counts.Projects,512);
+    assert.equal(counts.Localhost,60);
+    assert.equal(projects.filter(p=>p.serviceCount===1).length,60);
+    assert.ok(elapsed<300,'counts + projects took '+elapsed.toFixed(2)+' ms');
+});
+
+test('service indexing remains current across inventory and view-setting changes', () => {
+    const state={projects:[project('/work/project'),project('/work/project/nested')],ports:[port(),{...port(4000),cwd:'/work/project/nested/src'}],containers:[{...container(),publishedPorts:[],composeDir:'/work/project/docker'}]};
+    const cfg=M.config({});
+    assert.equal(M.projectServices(state,'/work/project',cfg).length,2);
+    assert.equal(M.rows(state,'Projects','','active',cfg).length,2);
+    assert.equal(M.projectServices(state,'/work/project',M.config({hiddenPorts:'3000',dockerEnabled:false})).length,0);
+    assert.equal(M.projectServices({...state,ports:[]},'/work/project',cfg).length,1);
+    assert.equal(M.rows({...state,ports:[]},'Projects','','active',cfg).length,1);
+    const o=M.overview(state,cfg);
+    assert.equal(o.listening.total,2);
+});
+
+test('scope diagnostics replace scanning placeholders even without an accepted inventory', () => {
+    const cfg=M.config({projectRoots:'/work'});
+    for (const tab of ['Projects','Tools']) {
+        assert.equal(M.emptyText(tab,'','all','Collector timed out.',false,cfg),'Collector timed out.');
+        assert.equal(M.emptyText(tab,'needle','active','Partial inventory failure.',true,cfg),'Partial inventory failure.');
+    }
+});
+
+test('direct project views preserve the optional configuration argument with indexed services', () => {
+    const state={projects:[project()],ports:[port()]};
+    assert.equal(M.viewRow(state.projects[0],'project',state).serviceCount,1);
 });

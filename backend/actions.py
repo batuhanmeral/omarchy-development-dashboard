@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import errno
 import json
 import os
@@ -11,12 +10,14 @@ import re
 import select
 import signal
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from collector import (
     ID_PATTERN,
+    CLIParser,
     CollectionError,
     CommandRunner,
     Runner,
@@ -89,7 +90,8 @@ def docker_action(
     try:
         prefix = local_docker(runner) + ["container"]
         inspect = prefix + ["inspect", "--format", "{{json .State.Status}}", container_id]
-        json.loads(runner.run(inspect))
+        if not isinstance(json.loads(runner.run(inspect)), str):
+            raise ValueError
         verb = operation.removeprefix("docker-")
         args = [verb] + (["--time", "10"] if verb != "start" else []) + [container_id]
         runner.run(prefix + args, timeout=40 if verb == "restart" else 30)
@@ -131,7 +133,7 @@ def listening_on(output: str, pid: int, port: int) -> bool:
             and any(
                 int(value) == pid
                 for value in re.findall(
-                    r"\bpid=(\d+)(?=[,)\s]|$)", fields[5].partition("users:")[2]
+                    r'\("(?:[^"\\]|\\.)*",pid=(\d+),', fields[5].partition("users:")[2]
                 )
             )
         ):
@@ -224,6 +226,11 @@ def project_directory(path: str, roots: list[str]) -> Path:
     resolved_roots = [validate_root(root) for root in roots]
     if not any(directory == root or root in directory.parents for root in resolved_roots):
         raise CollectionError("path is not inside a project folder")
+    try:
+        if directory.stat().st_uid != os.getuid():
+            raise CollectionError("The project folder is not owned by you")
+    except OSError as exc:
+        raise CollectionError("The project folder is not owned by you") from exc
     return directory
 
 
@@ -283,7 +290,7 @@ def launch_action(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = CLIParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
     for operation in ("docker-start", "docker-stop", "docker-restart"):
         command = commands.add_parser(operation)
@@ -300,7 +307,19 @@ def main() -> int:
         command.add_argument("--editor", default="")
         command.add_argument("--tool", default="")
         command.add_argument("--custom-tool", action="append", default=[])
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except CollectionError as exc:
+        result = dict(
+            schemaVersion=1,
+            kind="action",
+            action=clean(sys.argv[1], 64) if len(sys.argv) > 1 else "",
+            ok=False,
+            errors=[str(exc)],
+            data={},
+        )
+        print(json.dumps(result, separators=(",", ":")))
+        return 1
     result: dict[str, Any] = dict(
         schemaVersion=1, kind="action", action=args.operation, ok=True, errors=[], data={}
     )

@@ -46,19 +46,23 @@ def valid_executable(value: str) -> bool:
 def resolve_executable(name_or_path: str) -> Path:
     if not valid_executable(name_or_path):
         raise CollectionError("not found")
+    search_dirs = [
+        Path(directory)
+        for directory in os.environ.get("PATH", "").split(os.pathsep)
+        if directory and Path(directory).is_absolute()
+    ]
+    search_dirs.extend(Path(directory).expanduser() for directory in EXTRA_DIRS)
     candidates = (
         [Path(name_or_path)]
         if Path(name_or_path).is_absolute()
-        else [
-            Path(directory).expanduser() / name_or_path
-            for directory in [*os.environ.get("PATH", "").split(os.pathsep), *EXTRA_DIRS]
-            if directory and Path(directory).expanduser().is_absolute()
-        ]
+        else [directory / name_or_path for directory in search_dirs if directory.is_absolute()]
     )
     for candidate in candidates:
         try:
             link = candidate.lstat()
             target = candidate.resolve(strict=True)
+            if not valid_executable(str(target)):
+                raise CollectionError("not executable")
             info = target.stat()
             # Linux symlink mode bits are always 0777 and have no access semantics.
             if (
@@ -70,7 +74,7 @@ def resolve_executable(name_or_path: str) -> Path:
                 raise CollectionError("unsafe permissions")
             if not stat.S_ISREG(info.st_mode) or not os.access(target, os.X_OK):
                 raise CollectionError("not executable")
-            return target
+            return candidate.absolute()
         except (FileNotFoundError, NotADirectoryError):
             continue
         except (OSError, RuntimeError) as exc:

@@ -295,15 +295,18 @@ function containerTone(row) {
 }
 
 // One list row. Every field is a primitive so it can live in a QML ListModel.
-function viewRow(row, kind, state, cfg) {
+function viewRow(row, kind, state, cfg, index) {
     var view = { id: row.id, kind: kind, lead: "", title: "", subtitle: "", badge: "", tone: "dim",
         rowState: row.state || "", exposure: "", url: "", copyText: "", containerId: "", port: row.port || 0 };
-    view.projectPath = projectPath(state || {}, kind === "container" ? row.composeDir : kind === "project" ? row.path : row.cwd);
+    index = index || (state ? serviceIndex(state, cfg || config({})) : null);
+    var associations = index ? kind === "container" ? index.containers : index.ports : {};
+    view.projectPath = kind === "project" ? row.path : associations[row.id] !== undefined ? associations[row.id]
+        : projectPath(state || {}, kind === "container" ? row.composeDir : row.cwd, index);
     view.ownedByUser = row.ownedByUser === true;
     view.startTicks = row.startTicks || "";
     view.command = row.command || "";
     view.favorite = !!cfg && lines(cfg.favoriteProjects).indexOf(row.path) >= 0;
-    view.serviceCount = kind === "project" && state ? projectServices(state, row.path, cfg).length : 0;
+    view.serviceCount = kind === "project" && index ? indexedServices(index, row.path, cfg || config({})).length : 0;
     var words = [];
     if (kind === "project") {
         view.title = row.name;
@@ -450,17 +453,18 @@ function filters(tab) {
         { value: "stopped", label: "Stopped" }];
 }
 
-function rows(state, tab, query, filter, cfg) {
+function rows(state, tab, query, filter, cfg, index) {
     var output = [];
+    index = index || (["Localhost", "Docker", "Databases", "Projects"].indexOf(tab) >= 0 ? serviceIndex(state, cfg) : null);
     if (tab === "Localhost" || tab === "Databases") {
-        listeners(state, cfg.dockerEnabled).forEach(function (row) {
-            if (!hidden(row, cfg) && (tab !== "Databases" || row.database)) output.push(viewRow(row, "port", state, cfg));
+        index.listeners.forEach(function (row) {
+            if (!hidden(row, cfg) && (tab !== "Databases" || row.database)) output.push(viewRow(row, "port", state, cfg, index));
         });
     }
     if (cfg.dockerEnabled && (tab === "Docker" || tab === "Databases")) {
         (state.containers || []).forEach(function (row) {
             if (tab === "Databases" && (!row.database || output.some(function (r) { return r.containerId === row.id; }))) return;
-            output.push(viewRow(row, "container", state, cfg));
+            output.push(viewRow(row, "container", state, cfg, index));
         });
     }
     if (tab === "Databases") (state.sqlite || []).forEach(function (row) { output.push(viewRow(row, "sqlite")); });
@@ -468,7 +472,7 @@ function rows(state, tab, query, filter, cfg) {
         (state.images || []).forEach(function (row) { output.push(viewRow(row, "image")); });
         (state.volumes || []).forEach(function (row) { output.push(viewRow(row, "volume")); });
     }
-    if (tab === "Projects") (state.projects || []).forEach(function (row) { output.push(viewRow(row, "project", state, cfg)); });
+    if (tab === "Projects") (state.projects || []).forEach(function (row) { output.push(viewRow(row, "project", state, cfg, index)); });
     if (tab === "Tools") (state.tools || []).forEach(function (row) { output.push(viewRow(row, "tool", state, cfg)); });
     var search = String(query || "").toLowerCase().trim();
     output = output.filter(function (row) {
@@ -499,7 +503,13 @@ function rows(state, tab, query, filter, cfg) {
 
 function counts(state, cfg) {
     var output = {};
-    tabNames.forEach(function (tab) { output[tab] = rows(state, tab, "", "all", cfg).length; });
+    var index = serviceIndex(state, cfg);
+    tabNames.forEach(function (tab) {
+        if (tab === "Overview") output[tab] = 0;
+        else if (tab === "Projects") output[tab] = (state.projects || []).length;
+        else if (tab === "Tools") output[tab] = (state.tools || []).length;
+        else output[tab] = rows(state, tab, "", "all", cfg, index).length;
+    });
     return output;
 }
 
@@ -545,6 +555,7 @@ function tabLabel(tab) {
 }
 
 function emptyText(tab, query, filter, notice, sampled, cfg) {
+    if (notice && (tab === "Projects" || tab === "Tools")) return notice;
     if (tab === "Projects") {
         if (!cfg || !lines(cfg.projectRoots).length) return "No project folders yet. Add one in settings (s).";
         if (!sampled) return "Scanning projects…";
@@ -647,31 +658,54 @@ function decodeAction(raw) {
     return result;
 }
 
-function projectPath(state, path) {
-    if (!validPath(path)) return "";
-    var match = "";
-    (state.projects || []).forEach(function (project) {
-        if (validPath(project.path) && inside(path, project.path) && project.path.length > match.length) match = project.path;
-    });
-    return match;
+// Inventory arrays are replaced by merge(), never edited in place. Keep only the latest
+// association index; view-only settings are applied when reading it, not cached here.
+var serviceCache = null;
+
+function serviceIndex(state, cfg) {
+    if (serviceCache && serviceCache.projectsSource === state.projects && serviceCache.portsSource === state.ports
+            && serviceCache.containersSource === state.containers && serviceCache.dockerEnabled === cfg.dockerEnabled)
+        return serviceCache;
+    var index = {projectsSource:state.projects, portsSource:state.ports, containersSource:state.containers,
+        dockerEnabled:cfg.dockerEnabled, paths:(state.projects || []).map(function (p) { return p.path; }).filter(validPath)
+            .sort(function (a, b) { return b.length - a.length; }),
+        ports:Object.create(null), containers:Object.create(null), services:Object.create(null), listeners:listeners(state, cfg.dockerEnabled)};
+    function assign(row, kind, path) {
+        var match = projectPath(state, path, index);
+        (kind === "port" ? index.ports : index.containers)[row.id] = match;
+        if (!match) return;
+        if (!index.services[match]) index.services[match] = [];
+        index.services[match].push({row:row, kind:kind});
+    }
+    index.listeners.forEach(function (row) { assign(row, "port", row.cwd); });
+    if (cfg.dockerEnabled) (state.containers || []).forEach(function (row) { assign(row, "container", row.composeDir); });
+    serviceCache = index;
+    return index;
 }
 
-function projectServices(state, path, cfg) {
+function projectPath(state, path, index) {
+    if (!validPath(path)) return "";
+    var paths = index ? index.paths : (state.projects || []).map(function (p) { return p.path; }).filter(validPath)
+        .sort(function (a, b) { return b.length - a.length; });
+    for (var i = 0; i < paths.length; i++) if (inside(path, paths[i])) return paths[i];
+    return "";
+}
+
+function indexedServices(index, path, cfg) {
+    return (index.services[path] || []).filter(function (service) { return service.kind !== "port" || !hidden(service.row, cfg); });
+}
+
+function projectServices(state, path, cfg, index) {
     cfg = cfg || config({});
-    var output = [];
-    listeners(state, cfg.dockerEnabled).forEach(function (row) {
-        if (projectPath(state, row.cwd) === path && !hidden(row, cfg)) output.push(viewRow(row, "port", state, cfg));
-    });
-    if (cfg.dockerEnabled) (state.containers || []).forEach(function (row) {
-        if (projectPath(state, row.composeDir) === path) output.push(viewRow(row, "container", state, cfg));
-    });
-    return output;
+    index = index || serviceIndex(state, cfg);
+    return indexedServices(index, path, cfg).map(function (service) { return viewRow(service.row, service.kind, state, cfg, index); });
 }
 
 function overview(state, cfg) {
-    var ports = rows(state, "Localhost", "", "all", cfg);
+    var index = serviceIndex(state, cfg);
+    var ports = rows(state, "Localhost", "", "all", cfg, index);
     var containers = cfg.dockerEnabled ? state.containers || [] : [];
-    var projects = rows(state, "Projects", "", "all", cfg);
+    var projects = rows(state, "Projects", "", "all", cfg, index);
     var tools = state.tools || [];
     var favorites = projects.filter(function (p) { return p.favorite; });
     var exposed = ports.filter(function (p) { return p.exposure !== "localhost"; });
@@ -679,7 +713,7 @@ function overview(state, cfg) {
         listening: {total:ports.length, exposed:exposed.length},
         containers: {running:containers.filter(function (c) { return c.state === "running"; }).length, total:containers.length,
             unhealthy:containers.filter(function (c) { return c.health === "unhealthy"; }).length},
-        databases:rows(state, "Databases", "", "all", cfg).length,
+        databases:rows(state, "Databases", "", "all", cfg, index).length,
         projects:{total:projects.length, favorites:favorites.length},
         aiTools:{available:tools.filter(function (t) { return t.available; }).length, total:tools.length},
         favorites:favorites.slice(0, 5), exposed:exposed.slice(0, 5)
@@ -730,27 +764,28 @@ function actionArgs(op, view, cfg, context) {
     var row = rawRow(view); context = context || {};
     op = {"docker-start":"start", "docker-stop":"stop", "docker-restart":"restart", "process-terminate":"terminate",
         "open-terminal":"terminal", "open-editor":"editor", "open-files":"files"}[op] || op;
-    if (["start", "stop", "restart"].indexOf(op) >= 0) return /^[a-f0-9]{64}$/.test(row.id) ? ["docker-" + op, "--container-id", row.id] : null;
+    if (["start", "stop", "restart"].indexOf(op) >= 0) return /^[a-f0-9]{64}$/.test(row.id) ? ["docker-" + op, "--container-id=" + row.id] : null;
     if (op === "terminate") {
         if (!Number.isInteger(row.pid) || row.pid < 2 || row.pid > 4194304 || typeof row.startTicks !== "string" || !/^\d{1,20}$/.test(row.startTicks || "")
                 || !Number.isInteger(row.port) || row.port < 1 || row.port > 65535) return null;
-        return ["process-terminate", "--pid", String(row.pid), "--start-ticks", row.startTicks, "--port", String(row.port)];
+        return ["process-terminate", "--pid=" + row.pid, "--start-ticks=" + row.startTicks, "--port=" + row.port];
     }
     if (["terminal", "editor", "files", "launch-tool"].indexOf(op) < 0) return null;
     var path = context.path || row.path;
     var roots = lines(cfg.projectRoots);
-    if (!validRoot(path) || !roots.length || !roots.every(validRoot) || !roots.some(function (r) { return inside(path, r); })) return null;
-    var args = [op === "launch-tool" ? op : "open-" + op, "--path", path];
-    roots.forEach(function (root) { args.push("--project-root", root); });
+    // The backend resolves symlinks and authorizes the canonical path against canonical roots.
+    if (!validRoot(path) || !roots.length || !roots.every(validRoot)) return null;
+    var args = [op === "launch-tool" ? op : "open-" + op, "--path=" + path];
+    roots.forEach(function (root) { args.push("--project-root=" + root); });
     if (op === "launch-tool") {
         if (!/^[a-z0-9-]{1,40}$/.test(row.id)) return null;
-        args.push("--tool", row.id);
+        args.push("--tool=" + row.id);
     }
-    if (op === "terminal" || op === "launch-tool") args.push("--terminal", cfg.terminal);
-    if (op === "editor") args.push("--editor", cfg.editor);
+    if (op === "terminal" || op === "launch-tool") args.push("--terminal=" + cfg.terminal);
+    if (op === "editor") args.push("--editor=" + cfg.editor);
     if (op === "launch-tool") {
         try { parseCustomTools(cfg.customTools); } catch (error) { return null; }
-        customLines(cfg.customTools).forEach(function (line) { args.push("--custom-tool", line); });
+        customLines(cfg.customTools).forEach(function (line) { args.push("--custom-tool=" + line); });
     }
     return args;
 }

@@ -91,11 +91,12 @@ Column {
         }
     }
 
-    // A Docker problem that still leaves rows to show, e.g. missing CPU figures.
+    // A partial query can retain useful rows alongside its scope-specific diagnostic.
     Label {
+        objectName: "scopeWarning"
         width: parent.width
-        visible: ["Docker", "Images", "Databases"].indexOf(root.panel.tab) >= 0 && root.panel.dockerNotice !== "" && root.panel.entries.count > 0
-        text: root.panel.dockerNotice
+        visible: root.panel.scopeNotice !== "" && root.panel.entries.count > 0
+        text: root.panel.scopeNotice
         color: root.panel.dim
         font.pixelSize: root.panel.fonts.bodySmall
         wrapMode: Text.WordWrap
@@ -212,7 +213,8 @@ Column {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             color: root.panel.dim
-            text: Model.emptyText(root.panel.tab, root.panel.query, root.panel.filter, root.panel.errors[root.panel.tab === "Projects" ? "projects" : "tools"] || root.panel.dockerNotice, root.panel.tab === "Projects" ? root.panel.inventory.projects !== undefined : root.panel.tab === "Tools" ? root.panel.inventory.tools !== undefined : root.panel.sampled, root.panel.cfg)
+            objectName: "emptyState"
+            text: Model.emptyText(root.panel.tab, root.panel.query, root.panel.filter, root.panel.scopeNotice, root.panel.tab === "Projects" ? root.panel.inventory.projects !== undefined : root.panel.tab === "Tools" ? root.panel.inventory.tools !== undefined : root.panel.sampled, root.panel.cfg)
         }
     }
 

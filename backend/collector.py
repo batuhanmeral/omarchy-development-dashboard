@@ -11,12 +11,13 @@ import os
 import pwd
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 MAX_ROWS = 4096
 MAX_BYTES = 2 * 1024 * 1024
@@ -26,12 +27,21 @@ class CollectionError(Exception):
     """A safe, non-sensitive diagnostic suitable for the UI."""
 
 
+class CLIParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise CollectionError("invalid arguments")
+
+
 class CommandFailed(CollectionError):
     """A failed command with bounded, display-safe stderr for classification."""
 
-    def __init__(self, message: str, stderr: str):
+    def __init__(self, message: str, stderr: str, returncode: int | None = None):
         super().__init__(message)
-        self.stderr = "\n".join(clean(line, 4096) for line in stderr.splitlines())[-4096:]
+        self.returncode = returncode
+        safe = "\n".join(clean(line, 4096) for line in stderr.splitlines())
+        self.stderr = safe.encode("utf-8", errors="replace")[-4096:].decode(
+            "utf-8", errors="ignore"
+        )
 
 
 class CommandRunner(Protocol):
@@ -70,8 +80,12 @@ class Runner:
         # Explicit local --host always wins over ambient Docker contexts.
         env.pop("DOCKER_CONTEXT", None)
         try:
+            executable = shutil.which(argv[0], path=env.get("PATH"))
+            if executable is None:
+                raise FileNotFoundError
+            resolved_argv = [executable, *argv[1:]]
             child = subprocess.Popen(  # noqa: S603 — internal fixed argv, never a shell
-                argv,
+                resolved_argv,
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -114,6 +128,7 @@ class Runner:
                     raise CommandFailed(
                         f"{Path(argv[0]).name} failed (exit {status})",
                         stderr.decode("utf-8", errors="replace"),
+                        returncode=status,
                     )
         finally:
             if child.poll() is None:
@@ -146,7 +161,12 @@ def docker_error(exc: CollectionError) -> str:
     return str(exc) + (": " + first if first else "")
 
 
-SECRET_NAME = re.compile(r"pass|secret|token|key|auth|credential|cred", re.IGNORECASE)
+SECRET_NAME = re.compile(
+    r"pw|pass|passwd|secret|token|key|apikey|auth|credential|cred|jwt|bearer|session|sig",
+    re.IGNORECASE,
+)
+SECRET_HEADER = re.compile(r"(?:^|=)([A-Za-z0-9_-]+):(\s*)(.*)$", re.DOTALL)
+URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)(?=[^/\s?#]*@)[^\s]*@")
 
 
 def redact_command(argv: list[str]) -> str:
@@ -157,14 +177,28 @@ def redact_command(argv: list[str]) -> str:
             result.append("***")
             hide_next = False
             continue
+        header = SECRET_HEADER.search(value)
+        if header and SECRET_NAME.search(header[1]):
+            prefix = value[: header.start(3)]
+            if header[3]:
+                result.append(prefix + "***")
+            else:
+                result.append(prefix.rstrip())
+                hide_next = True
+            continue
+        if value.startswith(("-p", "-P")):
+            if len(value) == 2:
+                result.append(value)
+                hide_next = True
+            else:
+                result.append(value[:2] + ("=" if value[2] == "=" else "") + "***")
+            continue
         name, separator, _ = value.partition("=")
         if SECRET_NAME.search(name) and (value.startswith("-") or separator):
             result.append(name + "=***" if separator else name)
             hide_next = not separator
         else:
-            result.append(
-                re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+:[^/@\s]*@", r"\1***@", value)
-            )
+            result.append(URL_USERINFO.sub(r"\1***@", value))
     return clean(" ".join(result), 512)
 
 
@@ -256,6 +290,8 @@ def process_metadata(pid: int, proc_root: Path = Path("/proc")) -> dict[str, Any
     directory = proc_root / str(pid)
     try:
         before = (directory / "stat").read_text().rsplit(") ", 1)[1].split()[19]
+        if not re.fullmatch(r"[0-9]+", before):
+            return unknown
         result["process"] = clean((directory / "comm").read_text().strip()) or "Unknown"
         uid = directory.stat().st_uid
         result.update(uid=uid, ownedByUser=uid == os.getuid() and uid != 0, startTicks=before)
@@ -283,7 +319,7 @@ def process_metadata(pid: int, proc_root: Path = Path("/proc")) -> dict[str, Any
         if before != after:
             return unknown
     except (OSError, ValueError, IndexError):
-        pass
+        return unknown
     return result
 
 
@@ -425,7 +461,9 @@ def normalized_container(raw: dict[str, Any]) -> dict[str, Any]:
         exposedPorts=sorted({clean(key) for key in (raw.get("exposed") or {})})[:64],
         composeDir=(
             clean(raw["workdir"], 4096)
-            if isinstance(raw.get("workdir"), str) and Path(raw["workdir"]).is_absolute()
+            if isinstance(raw.get("workdir"), str)
+            and Path(raw["workdir"]).is_absolute()
+            and not any(ch in raw["workdir"] for ch in "\0\n\r")
             else None
         ),
         cpu=None,
@@ -619,7 +657,7 @@ def collect(
                     valid.append(str(validate_root(root)))
                 except CollectionError:
                     errors.append("Invalid project folder: " + clean(root, 4096))
-            projects, skipped = discover(valid, project_depth)
+            projects, skipped = discover(valid, project_depth, errors=errors)
             for project in projects[:64]:
                 project.update(git_status(Path(project["path"]), runner))
             data.update(projects=projects, skipped=skipped)
@@ -643,7 +681,7 @@ def collect(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = CLIParser(description=__doc__)
     parser.add_argument(
         "scope", choices=["ports", "docker", "assets", "logs", "projects", "tools", "legacy"]
     )
@@ -653,7 +691,18 @@ def main() -> int:
     parser.add_argument("--project-root", action="append", default=[])
     parser.add_argument("--project-depth", type=int, choices=range(1, 5), default=3)
     parser.add_argument("--custom-tool", action="append", default=[])
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except CollectionError as exc:
+        result = dict(
+            schemaVersion=1,
+            kind=clean(sys.argv[1], 64) if len(sys.argv) > 1 else "",
+            ok=False,
+            errors=[str(exc)],
+            data={},
+        )
+        print(json.dumps(result, separators=(",", ":")))
+        return 1
     result: dict[str, Any]
     if args.scope == "logs":
         try:
@@ -684,4 +733,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Sibling modules import collector's shared exceptions and Runner. Keep one module identity.
+    sys.modules["collector"] = sys.modules[__name__]
     raise SystemExit(main())

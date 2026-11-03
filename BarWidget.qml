@@ -26,6 +26,7 @@ Ui.BarWidget {
     property bool refreshing: false
     property string actionName: ""
     property bool legacyAttempted: false
+    property var collectionSettings: null
     property var operation: ({
             op: "",
             label: "",
@@ -129,16 +130,14 @@ Ui.BarWidget {
             args.push("--no-docker");
         if (scope === "projects") {
             Model.lines(cfg.projectRoots).forEach(function (path) {
-                args.push("--project-root", path);
+                args.push("--project-root=" + path);
             });
-            args.push("--project-depth", String(cfg.projectDepth));
+            args.push("--project-depth=" + cfg.projectDepth);
         }
         if (scope === "tools")
             Model.customLines(cfg.customTools).forEach(function (line) {
-                args.push("--custom-tool", line);
+                args.push("--custom-tool=" + line);
             });
-        if (scope === "legacy")
-            legacyAttempted = true;
         if (scope === "ports")
             cfg.sqliteFiles.split("\n").filter(function (path) {
                 return path.trim();
@@ -146,7 +145,7 @@ Ui.BarWidget {
                 args.push("--sqlite-file=" + path.trim());
             });
         if (logRequest)
-            args.push("--container-id", logRequest.id);
+            args.push("--container-id=" + logRequest.id);
         job = {
             scope: scope,
             generation: generation,
@@ -179,6 +178,8 @@ Ui.BarWidget {
         drain.stop();
         var outcome = Model.outcome(done.scope, done.raw, done.exitCode, done.timedOut);
         if (Model.current(done, generation, logState.generation)) {
+            if (done.scope === "legacy")
+                legacyAttempted = true;
             if (done.scope === "logs") {
                 if (outcome.result)
                     logState.accept(done.logToken, outcome.result);
@@ -333,9 +334,28 @@ Ui.BarWidget {
     onSettingsChanged: {
         // Runs while `cfg` may still be unevaluated, so derive the new configuration here.
         var next = Model.config(settings);
-        generation++;
-        clearLogs();
-        lastPoll = {};
+        var collecting = {
+            dockerEnabled: next.dockerEnabled,
+            sqliteFiles: next.sqliteFiles,
+            projectRoots: next.projectRoots,
+            projectDepth: next.projectDepth,
+            customTools: next.customTools
+        };
+        var changed = JSON.stringify(collectionSettings) !== JSON.stringify(collecting);
+        collectionSettings = collecting;
+        if (changed) {
+            generation++;
+            clearLogs();
+            lastPoll = {};
+            Qt.callLater(poll);
+        }
+        if (!Model.lines(next.projectRoots).length) {
+            inventory = Model.merge(inventory, {
+                projects: [],
+                skipped: 0
+            });
+            setError("projects", "");
+        }
         if (!next.dockerEnabled) {
             inventory = Model.absorb(inventory, {
                 dockerStatus: "disabled"

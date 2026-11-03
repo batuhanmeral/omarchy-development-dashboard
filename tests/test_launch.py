@@ -45,7 +45,7 @@ class LaunchTests(unittest.TestCase):
                 self.l.resolve_executable(str(file))
         link = self.root / "link"
         link.symlink_to(good)
-        self.assertEqual(self.l.resolve_executable("link"), good)
+        self.assertEqual(self.l.resolve_executable("link"), link)
         good.chmod(0o777)
         with self.assertRaisesRegex(c.CollectionError, "unsafe permissions"):
             self.l.resolve_executable("link")

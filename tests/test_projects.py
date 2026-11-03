@@ -100,6 +100,8 @@ class ProjectsTests(unittest.TestCase):
 
             def run(self, argv, **kwargs):
                 self.calls.append((argv, kwargs))
+                if "config" in argv:
+                    return ""
                 return (
                     "# branch.oid abc\0# branch.head main\0# branch.ab +2 -3\0"
                     + "1 M. x\0"
@@ -122,7 +124,7 @@ class ProjectsTests(unittest.TestCase):
                 gitState="dirty",
             ),
         )
-        argv, kwargs = runner.calls[0]
+        argv, kwargs = runner.calls[1]
         self.assertEqual(
             argv,
             [
@@ -139,6 +141,7 @@ class ProjectsTests(unittest.TestCase):
                 "--branch",
                 "-z",
                 "--untracked-files=normal",
+                "--ignore-submodules=all",
             ],
         )
         self.assertEqual(kwargs["timeout"], 2)
@@ -155,6 +158,8 @@ class ProjectsTests(unittest.TestCase):
             calls = 0
 
             def run(self, argv, **kwargs):
+                if "config" in argv:
+                    return ""
                 self.calls += 1
                 return "# branch.head main\0"
 

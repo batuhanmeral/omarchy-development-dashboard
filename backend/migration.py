@@ -48,7 +48,11 @@ def legacy_settings(config_home: Path | None = None, home: Path | None = None) -
                     key: entry[key]
                     for key, types in SETTING_TYPES.items()
                     if type(entry.get(key)) in types
-                    and (key != "refreshInterval" or math.isfinite(entry[key]))
+                    and (
+                        key != "refreshInterval"
+                        or type(entry[key]) is int
+                        or math.isfinite(entry[key])
+                    )
                 }
                 return dict(legacy=legacy)
     except (OSError, ValueError, TypeError, AttributeError, RecursionError):

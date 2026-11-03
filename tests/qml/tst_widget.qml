@@ -37,6 +37,10 @@ TestCase {
         }
     }
 
+    function cleanup() {
+        suite.visible = false;
+    }
+
     function port(n, name) {
         return {
             id: "tcp:127.0.0.1:" + n,
@@ -65,6 +69,25 @@ TestCase {
                 sqlite: []
             }
         });
+    }
+    function reply(scope, data, ok, errors) {
+        return JSON.stringify({
+            schemaVersion: 1,
+            kind: scope,
+            ok: ok === undefined ? true : ok,
+            errors: errors || [],
+            data: data
+        });
+    }
+    function projectRow() {
+        return {
+            id: "project:/work/app",
+            path: "/work/app",
+            root: "/work",
+            name: "app",
+            gitState: "clean",
+            branch: "main"
+        };
     }
     function createWidget() {
         const widget = createTemporaryObject(widgetComponent, suite);
@@ -116,7 +139,7 @@ TestCase {
         const t = createWidget();
         t.widget.settings = {
             dockerEnabled: false,
-            sortBy: "name"
+            sqliteFiles: "/work/app.db"
         };
         t.worker.finishStream(portsReply([port(3000, "vite")]));
         t.worker.exit(0);
@@ -184,6 +207,7 @@ TestCase {
         tryVerify(function () {
             return findChild(panel, "keys") !== null;
         });
+        panel.selectTab("Localhost");
         const keys = findChild(panel, "keys");
         tryVerify(function () {
             return keys.activeFocus;
@@ -266,11 +290,26 @@ TestCase {
     }
     function test_yConfirmsActionAndResultNotifiesAndRefreshes() {
         const p = dockerPanel(true);
+        const collector = findChild(p.widget, "collector");
+        const now = Date.now();
+        p.widget.lastPoll = {
+            ports: now,
+            docker: now,
+            assets: now,
+            tools: now,
+            legacy: now
+        };
+        if (p.widget.job) {
+            collector.finishStream(reply(p.widget.job.scope, {}));
+            collector.exit(0);
+        }
+        settle(p.widget);
+        const launches = collector.launches;
         keyClick(Qt.Key_X);
         keyClick(Qt.Key_Y);
         const operation = findChild(p.widget, "operation");
         compare(operation.launches, 1);
-        compare(operation.command.slice(2).join("|"), "docker-stop|--container-id|" + cid);
+        compare(operation.command.slice(2).join("|"), "docker-stop|--container-id=" + cid);
         verify(p.widget.operation.running);
         operation.exit(0);
         verify(p.widget.operation.running, "wait for stream even if exit arrives first");
@@ -288,7 +327,9 @@ TestCase {
         verify(!p.widget.operation.running);
         verify(!p.widget.messageUrgent);
         verify(p.widget.message.indexOf("Stopped") >= 0, p.widget.message);
-        verify(p.widget.lastPoll.docker === 0 || p.widget.job.scope === "docker");
+        tryCompare(collector, "launches", launches + 1, 250);
+        compare(p.widget.job.scope, "ports");
+        compare(collector.command[2], "ports");
     }
     function test_managementDisabledAndInvalidActionCannotLaunch() {
         const p = dockerPanel(false);
@@ -360,7 +401,7 @@ TestCase {
         t.worker.exit(0);
         settle(t.widget);
         t.widget.start("projects", null);
-        compare(t.worker.command.slice(2).join("|"), "projects|--project-root|/work/a|--project-root|/work/b|--project-depth|4");
+        compare(t.worker.command.slice(2).join("|"), "projects|--project-root=/work/a|--project-root=/work/b|--project-depth=4");
         t.worker.finishStream(JSON.stringify({
             schemaVersion: 1,
             kind: "projects",
@@ -374,7 +415,7 @@ TestCase {
         t.worker.exit(0);
         settle(t.widget);
         t.widget.start("tools", null);
-        compare(t.worker.command.slice(2).join("|"), "tools|--custom-tool|Aider | aider | --no-auto-commits");
+        compare(t.worker.command.slice(2).join("|"), "tools|--custom-tool=Aider | aider | --no-auto-commits");
         verify(t.widget.runOperation("stop", Model.viewRow({
             id: cid,
             name: "web",
@@ -425,7 +466,7 @@ TestCase {
         keyClick(Qt.Key_T);
         const operation = findChild(p.widget, "operation");
         compare(operation.command[2], "open-terminal");
-        compare(operation.command[4], "/work/app");
+        verify(operation.command.indexOf("--path=/work/app") >= 0);
         operation.finishStream(JSON.stringify({
             schemaVersion: 1,
             kind: "action",
@@ -444,9 +485,8 @@ TestCase {
         compare(p.panel.toolProject, "/work/app");
         keyClick(Qt.Key_Return);
         compare(operation.command[2], "launch-tool");
-        compare(operation.command[4], "/work/app");
-        verify(operation.command.indexOf("--tool") >= 0);
-        compare(operation.command[operation.command.indexOf("--tool") + 1], "claude");
+        verify(operation.command.indexOf("--path=/work/app") >= 0);
+        verify(operation.command.indexOf("--tool=claude") >= 0);
     }
     function test_textInputsBlockNewShortcuts() {
         const p = dockerPanel(true);
@@ -527,5 +567,256 @@ TestCase {
         keyClick(Qt.Key_F, Qt.ShiftModifier);
         compare(p.widget.cfg.tabs.join(","), "Overview,Localhost,Docker,Projects,Tools");
         compare(p.widget.cfg.favoriteProjects, "/work/app");
+    }
+
+    function test_scopeWarningsAreIsolatedAndPartialProjectsRemainVisible() {
+        const p = openPanel();
+        // The production popup uses its own window; expose the Item-based test popup.
+        suite.visible = true;
+        p.panel.parent.visible = true;
+        p.widget.settings = {
+            projectRoots: "/work",
+            dockerEnabled: true
+        };
+        p.widget.inventory = {
+            projects: [projectRow()],
+            tools: [
+                {
+                    id: "claude",
+                    name: "Claude",
+                    available: true,
+                    path: "/bin/claude"
+                }
+            ]
+        };
+        p.widget.errors = {
+            projects: "Project scan stopped early: budget exceeded",
+            tools: "tool scan failed",
+            docker: "docker failed"
+        };
+        p.panel.selectTab("Projects");
+        const warning = findChild(p.panel, "scopeWarning");
+        verify(warning !== null);
+        verify(warning.visible);
+        compare(warning.text, "Project scan stopped early: budget exceeded");
+        compare(p.panel.entries.count, 1);
+        p.panel.selectTab("Tools");
+        compare(warning.text, "tool scan failed");
+        verify(warning.visible);
+        p.panel.selectTab("Docker");
+        compare(warning.text, "docker failed");
+        const empty = findChild(p.panel, "emptyState");
+        compare(empty.text, "docker failed");
+        p.widget.errors = {
+            tools: "tool scan failed"
+        };
+        compare(empty.text, "No containers.");
+        p.panel.selectTab("Projects");
+        p.widget.inventory = {};
+        p.widget.errors = {
+            projects: "Collector timed out; showing previous data."
+        };
+        compare(empty.text, "Collector timed out; showing previous data.");
+        p.panel.selectTab("Tools");
+        p.widget.errors = {
+            tools: "Tool collection failed."
+        };
+        compare(empty.text, "Tool collection failed.");
+    }
+    function test_partialProjectsReplyKeepsRowsAndShowsDiagnostic() {
+        const p = openPanel();
+        suite.visible = true;
+        p.panel.parent.visible = true;
+        p.widget.settings = {
+            projectRoots: "/work",
+            dockerEnabled: false
+        };
+        const worker = findChild(p.widget, "collector");
+        if (p.widget.job) {
+            worker.finishStream(reply(p.widget.job.scope, {}));
+            worker.exit(0);
+        }
+        // Hold unrelated scopes fresh so this test controls the projects run.
+        p.widget.lastPoll = {
+            ports: Date.now(),
+            tools: Date.now(),
+            legacy: Date.now(),
+            projects: Date.now()
+        };
+        settle(p.widget);
+        p.widget.start("projects", null);
+        worker.finishStream(reply("projects", {
+            projects: [projectRow()],
+            skipped: 2
+        }, false, ["Project scan stopped early: budget exceeded"]));
+        worker.exit(1);
+        p.panel.selectTab("Projects");
+        compare(p.panel.entries.count, 1);
+        const warning = findChild(p.panel, "scopeWarning");
+        verify(warning !== null);
+        verify(warning.visible);
+        compare(warning.text, "Project scan stopped early: budget exceeded");
+    }
+    function test_removingLastProjectRootClearsProjectsAndPicker() {
+        const p = openPanel();
+        p.widget.settings = {
+            projectRoots: "/work",
+            dockerEnabled: false
+        };
+        p.widget.inventory = {
+            projects: [projectRow()],
+            skipped: 3
+        };
+        compare(p.panel.projectOptions.length, 1);
+        p.widget.settings = {
+            projectRoots: "",
+            dockerEnabled: false
+        };
+        compare(p.widget.inventory.projects.length, 0);
+        compare(p.widget.inventory.skipped, 0);
+        compare(p.panel.projectOptions.length, 0);
+        compare(p.panel.toolProject, "");
+    }
+    function test_disappearingRowCancelsConfirmationAndRestoresKeys() {
+        const p = dockerPanel(true);
+        keyClick(Qt.Key_X);
+        verify(p.panel.confirming);
+        p.widget.inventory = {
+            containers: []
+        };
+        verify(!p.panel.confirming);
+        verify(p.keys.activeFocus);
+        keyClick(Qt.Key_5);
+        compare(p.panel.tab, "Projects");
+        compare(findChild(p.widget, "operation").launches, 0);
+    }
+    function test_viewChangeDoesNotStealConfirmationFocus() {
+        const p = dockerPanel(true);
+        keyClick(Qt.Key_X);
+        verify(p.panel.confirming);
+        p.panel.view = "logs";
+        verify(!p.keys.activeFocus);
+        keyClick(Qt.Key_Escape);
+        verify(!p.panel.confirming);
+        verify(p.keys.activeFocus);
+    }
+    function test_staleLegacyResultIsRetriedAfterCollectionSettingsChange() {
+        const t = createWidget();
+        t.worker.finishStream(portsReply([]));
+        t.worker.exit(0);
+        settle(t.widget);
+        t.widget.start("legacy", null);
+        t.widget.settings = {
+            dockerEnabled: false,
+            sqliteFiles: "/work/app.db"
+        };
+        t.worker.finishStream(reply("legacy", {
+            legacy: {
+                found: true,
+                installed: false,
+                settings: {
+                    refreshInterval: 17
+                }
+            }
+        }));
+        t.worker.exit(0);
+        verify(!t.widget.legacyAttempted);
+        verify(t.widget.inventory.legacy === undefined);
+        // Settling the refreshed ports leaves all open-panel scopes fresh except legacy.
+        tryCompare(t.worker, "launches", 3);
+        t.worker.finishStream(portsReply([]));
+        t.worker.exit(0);
+        settle(t.widget);
+        t.widget.lastPoll = {
+            ports: Date.now(),
+            tools: Date.now()
+        };
+        t.widget.open();
+        tryVerify(function () {
+            return t.widget.job && t.widget.job.scope === "legacy";
+        });
+        t.worker.finishStream(reply("legacy", {
+            legacy: {
+                found: false,
+                installed: false
+            }
+        }));
+        t.worker.exit(0);
+        verify(t.widget.legacyAttempted);
+    }
+    function test_displaySettingsKeepRunningCollectorAndPollTimes() {
+        const t = createWidget();
+        const originalGeneration = t.widget.generation;
+        const originalPoll = JSON.stringify(t.widget.lastPoll);
+        const changes = {
+            favoriteProjects: "/work/app",
+            sortBy: "name",
+            compact: false,
+            terminal: "kitty",
+            editor: "code",
+            managementEnabled: true,
+            visibleTabs: "Tools",
+            exposure: "lan",
+            hiddenPorts: "80",
+            refreshInterval: 12
+        };
+        Object.keys(changes).forEach(function (key) {
+            const next = Object.assign({}, t.widget.settings);
+            next[key] = changes[key];
+            t.widget.settings = next;
+            compare(t.widget.generation, originalGeneration, key);
+            compare(JSON.stringify(t.widget.lastPoll), originalPoll, key);
+        });
+        t.worker.finishStream(portsReply([port(3000, "vite")]));
+        t.worker.exit(0);
+        settle(t.widget);
+        compare(t.widget.inventory.ports.length, 1);
+        compare(t.worker.launches, 1);
+    }
+    function test_collectorSettingsInvalidateRunningGeneration() {
+        const changes = {
+            dockerEnabled: true,
+            sqliteFiles: "/work/app.db",
+            projectRoots: "/work",
+            projectDepth: 4,
+            customTools: "Aider | aider"
+        };
+        Object.keys(changes).forEach(function (key) {
+            const t = createWidget();
+            const old = t.widget.generation;
+            const next = Object.assign({}, t.widget.settings);
+            next[key] = changes[key];
+            t.widget.settings = next;
+            compare(t.widget.generation, old + 1, key);
+        });
+    }
+    function test_optionShapedCustomToolUsesAttachedValue() {
+        const t = createWidget();
+        t.widget.settings = {
+            dockerEnabled: false,
+            customTools: "-x|aider"
+        };
+        t.worker.finishStream(portsReply([]));
+        t.worker.exit(0);
+        tryCompare(t.worker, "launches", 2);
+        t.worker.finishStream(portsReply([]));
+        t.worker.exit(0);
+        settle(t.widget);
+        t.widget.start("tools", null);
+        compare(t.worker.command.slice(2).join("|"), "tools|--custom-tool=-x|aider");
+    }
+    function test_initialTabIsOverviewOrFirstVisibleTab() {
+        const t = createWidget();
+        t.widget.open();
+        compare(t.widget.panel.tab, "Overview");
+        t.widget.close();
+        const hidden = createWidget();
+        hidden.widget.settings = {
+            settingsVersion: 2,
+            visibleTabs: "Tools,Docker",
+            dockerEnabled: false
+        };
+        hidden.widget.open();
+        compare(hidden.widget.panel.tab, "Docker");
     }
 }
