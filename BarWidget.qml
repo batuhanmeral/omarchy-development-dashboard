@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell.Io
-import qs.Commons
 import qs.Ui as Ui
 import "Model.js" as Model
 
@@ -8,7 +7,7 @@ import "Model.js" as Model
 // (Panel.qml) only renders what this item holds.
 Ui.BarWidget {
     id: root
-    moduleName: "io.github.batuhanmeral.devports"
+    moduleName: Model.pluginId
 
     readonly property var panel: panelLoader.item
     readonly property var hostBar: bar
@@ -26,6 +25,14 @@ Ui.BarWidget {
     property int generation: 0
     property bool refreshing: false
     property string actionName: ""
+    property bool legacyAttempted: false
+    property var operation: ({
+            op: "",
+            label: "",
+            running: false
+        })
+    property var operationJob: null
+    readonly property string actionsPath: decodeURIComponent(String(Qt.resolvedUrl("backend/actions.py")).replace(/^file:\/\//, ""))
     readonly property bool busy: job !== null
     readonly property bool opened: panelLoader.item ? panel.opened === true : false
     readonly property bool popoutSwitchClosing: panelLoader.item ? panel.popoutSwitchClosing === true : false
@@ -84,7 +91,10 @@ Ui.BarWidget {
             start("logs", queued);
             return;
         }
-        var scope = Model.nextScope(Date.now(), opened, cfg, lastPoll, false);
+        var schedule = legacyAttempted ? Object.assign({}, lastPoll, {
+            legacy: 1
+        }) : lastPoll;
+        var scope = Model.nextScope(Date.now(), opened, cfg, schedule, false);
         if (scope)
             start(scope, null);
         else
@@ -115,8 +125,20 @@ Ui.BarWidget {
 
     function start(scope, logRequest) {
         var args = ["python3", backendPath, scope];
-        if (!cfg.dockerEnabled)
+        if (!cfg.dockerEnabled && ["ports", "docker", "assets", "logs"].indexOf(scope) >= 0)
             args.push("--no-docker");
+        if (scope === "projects") {
+            Model.lines(cfg.projectRoots).forEach(function (path) {
+                args.push("--project-root", path);
+            });
+            args.push("--project-depth", String(cfg.projectDepth));
+        }
+        if (scope === "tools")
+            Model.customLines(cfg.customTools).forEach(function (line) {
+                args.push("--custom-tool", line);
+            });
+        if (scope === "legacy")
+            legacyAttempted = true;
         if (scope === "ports")
             cfg.sqliteFiles.split("\n").filter(function (path) {
                 return path.trim();
@@ -140,6 +162,7 @@ Ui.BarWidget {
                 [scope]: Date.now()
             });
         worker.command = args;
+        watchdog.interval = scope === "projects" ? 25000 : 15000;
         watchdog.restart();
         worker.running = true;
     }
@@ -182,7 +205,10 @@ Ui.BarWidget {
             notify("This bar cannot store plugin settings.", true);
             return false;
         }
-        var entry = Object.assign({}, root.settings, values, {
+        var entry = Object.assign({}, root.settings, {
+            settingsVersion: 2,
+            visibleTabs: cfg.visibleTabs
+        }, values, {
             id: moduleName
         });
         if (JSON.stringify(entry) === JSON.stringify(root.settings))
@@ -203,6 +229,93 @@ Ui.BarWidget {
         action.command = command;
         actionWatchdog.restart();
         action.running = true;
+    }
+
+    function runOperation(op, view, context) {
+        if (operation.running)
+            return false;
+        if (["start", "stop", "restart", "terminate", "docker-start", "docker-stop", "docker-restart", "process-terminate"].indexOf(op) >= 0 && !Model.canManage(view, cfg))
+            return false;
+        var args = Model.actionArgs(op, view, cfg, context);
+        if (!args) {
+            notify("Invalid operation arguments.", true);
+            return false;
+        }
+        var titles = {
+            "docker-start": "Starting",
+            "docker-stop": "Stopping",
+            "docker-restart": "Restarting",
+            "process-terminate": "Stopping",
+            "open-terminal": "Opening terminal for",
+            "open-editor": "Opening editor for",
+            "open-files": "Opening files for",
+            "launch-tool": "Launching"
+        };
+        operation = {
+            op: args[0],
+            label: (titles[args[0]] || "Running") + " " + (view.title || Model.rawRow(view).name || "project") + "…",
+            running: true
+        };
+        operationJob = {
+            op: args[0],
+            raw: undefined,
+            exitCode: -1,
+            exited: false,
+            streamed: false,
+            timedOut: false
+        };
+        operationProcess.command = ["python3", actionsPath].concat(args);
+        operationWatchdog.restart();
+        operationProcess.running = true;
+        return true;
+    }
+
+    function finishOperation() {
+        var done = operationJob;
+        if (!done)
+            return;
+        operationJob = null;
+        operationWatchdog.stop();
+        operationForceStop.stop();
+        operationDrain.stop();
+        operation = {
+            op: done.op,
+            label: "",
+            running: false
+        };
+        var result;
+        try {
+            if (done.timedOut)
+                throw new Error("Operation timed out.");
+            result = Model.decodeAction(done.raw);
+            if (result.action !== done.op)
+                throw new Error("Mismatched action response.");
+            if (!result.ok || done.exitCode !== 0)
+                throw new Error(result.errors.join("\n") || "Operation failed (exit " + done.exitCode + ").");
+            const labels = {
+                "docker-start": "Started container.",
+                "docker-stop": "Stopped container.",
+                "docker-restart": "Restarted container.",
+                "open-terminal": "Opened terminal.",
+                "open-editor": "Opened editor.",
+                "open-files": "Opened files.",
+                "launch-tool": "Launched AI tool."
+            };
+            notify(done.op === "process-terminate" ? result.data.result === "signaled" ? "Sent SIGTERM; the process is still running. It was not force-killed." : result.data.result === "already-exited" ? "The process has already exited." : "Process terminated." : labels[done.op] || "Operation completed.", false);
+        } catch (error) {
+            notify("Invalid or failed operation: " + error.message, true);
+        }
+        if (done.op.indexOf("docker-") === 0)
+            lastPoll = Object.assign({}, lastPoll, {
+                ports: 0,
+                docker: 0,
+                assets: 0
+            });
+        else if (done.op === "process-terminate")
+            lastPoll = Object.assign({}, lastPoll, {
+                ports: 0
+            });
+        Qt.callLater(poll);
     }
 
     function copyText(value) {
@@ -345,6 +458,64 @@ Ui.BarWidget {
                 root.notify(root.actionName + " failed. Is " + (root.actionName === "Copy" ? "wl-copy" : "xdg-open") + " installed?", true);
         }
     }
+    Timer {
+        id: operationWatchdog
+        objectName: "operationWatchdog"
+        interval: 45000
+        onTriggered: {
+            if (!root.operationJob)
+                return;
+            root.operationJob.timedOut = true;
+            if (operationProcess.running) {
+                operationProcess.signal(15);
+                operationForceStop.restart();
+            } else
+                root.finishOperation();
+        }
+    }
+    Timer {
+        id: operationForceStop
+        objectName: "operationForceStop"
+        interval: 1000
+        onTriggered: {
+            if (operationProcess.running)
+                operationProcess.signal(9);
+            else
+                root.finishOperation();
+        }
+    }
+    Timer {
+        id: operationDrain
+        interval: 300
+        onTriggered: root.finishOperation()
+    }
+    Process {
+        id: operationProcess
+        objectName: "operation"
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (!root.operationJob)
+                    return;
+                root.operationJob.raw = text;
+                root.operationJob.streamed = true;
+                if (root.operationJob.exited)
+                    root.finishOperation();
+            }
+        }
+        stderr: StdioCollector {}
+        onRunningChanged: if (!running && root.operationJob && !root.operationJob.exited)
+            operationDrain.restart()
+        onExited: function (exitCode, exitStatus) {
+            if (!root.operationJob)
+                return;
+            root.operationJob.exitCode = exitCode;
+            root.operationJob.exited = true;
+            if (root.operationJob.streamed)
+                root.finishOperation();
+            else
+                operationDrain.restart();
+        }
+    }
     Loader {
         id: panelLoader
         active: true
@@ -361,7 +532,7 @@ Ui.BarWidget {
         bar: root.bar
         text: Model.icon
         active: root.hasError
-        tooltipText: root.hasError ? "Development Ports\n" + root.errorText : "Development Ports · " + Model.summary(root.inventory, root.cfg)
+        tooltipText: root.hasError ? Model.displayName + "\n" + root.errorText : Model.displayName + " · " + Model.summary(root.inventory, root.cfg)
         onPressed: function (buttonCode) {
             if (buttonCode === Qt.LeftButton)
                 root.toggle();

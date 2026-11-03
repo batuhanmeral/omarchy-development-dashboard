@@ -6,6 +6,7 @@ Item {
     property bool blocked: false
     signal moveRequested(int dx, int dy)
     signal activateRequested
+    signal deleteRequested
     signal closeRequested
     signal tabRequested(int direction)
     signal textKey(string text, int modifiers)
@@ -27,6 +28,8 @@ Item {
             moveRequested(-1, 0);
         else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
             activateRequested();
+        else if (event.key === Qt.Key_Delete || event.text === "x" || event.text === "X")
+            deleteRequested();
         else if (event.text && event.text.length === 1)
             textKey(event.text, event.modifiers);
         else

@@ -15,6 +15,7 @@ TestCase {
         Plugin.Settings {
             width: 440
             values: ({
+                    settingsVersion: 2,
                     refreshInterval: 9,
                     dockerEnabled: false,
                     hiddenPorts: "53,80",
@@ -30,6 +31,9 @@ TestCase {
     }
     ListModel {
         id: entries
+    }
+    function cleanup() {
+        saved.clear();
     }
     function createLogs() {
         const component = Qt.createComponent(Qt.resolvedUrl("../../LogState.qml"));
@@ -187,6 +191,72 @@ TestCase {
         form.submit();
         compare(saved.count, 0);
         verify(form.validationError.indexOf("2 to 120") >= 0);
+        saved.clear();
+    }
+
+    function test_dashboardSettingsAndLegacyDraft() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        saved.target = form;
+        form.legacy = {
+            found: true,
+            installed: true,
+            settings: {
+                refreshInterval: 17,
+                compact: false,
+                hiddenPorts: "8080"
+            }
+        };
+        form.importLegacy();
+        compare(saved.count, 0);
+        compare(form.intervalField.value, 17);
+        verify(form.imported);
+        findChild(form, "projectRoots").text = "/work";
+        findChild(form, "customTools").text = "Aider | aider | --no-auto-commits";
+        form.managementEnabled = true;
+        form.terminal = "kitty";
+        form.submit();
+        compare(saved.count, 1);
+        const value = saved.signalArguments[0][0];
+        compare(value.settingsVersion, 2);
+        compare(value.projectRoots, "/work");
+        compare(value.customTools, "Aider | aider | --no-auto-commits");
+        compare(value.managementEnabled, true);
+        compare(value.terminal, "kitty");
+        saved.clear();
+    }
+    function test_visibleTabsMigrationInSettings() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        form.values = {
+            visibleTabs: "Docker"
+        };
+        form.load();
+        compare(form.tabs.join(","), "Overview,Docker,Projects,Tools");
+    }
+
+    function test_legacyImportPreservesDashboardOnlySettings() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        form.values = {
+            projectRoots: "/work",
+            terminal: "kitty",
+            managementEnabled: true,
+            favoriteProjects: "/work/app",
+            customTools: "Aider | aider"
+        };
+        form.legacy = {
+            found: true,
+            settings: {
+                refreshInterval: 13
+            }
+        };
+        form.importLegacy();
+        saved.target = form;
+        form.submit();
+        compare(saved.count, 1);
+        const value = saved.signalArguments[0][0];
+        compare(value.projectRoots, "/work");
+        compare(value.terminal, "kitty");
+        compare(value.favoriteProjects, "/work/app");
+        compare(value.managementEnabled, true);
         saved.clear();
     }
 }

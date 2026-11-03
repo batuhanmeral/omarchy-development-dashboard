@@ -28,7 +28,7 @@ test('configuration defaults, invalid bounds and empty tabs recover safely', () 
     assert.equal(M.config({}).refreshInterval, 5);
     assert.equal(M.config({ refreshInterval: -1 }).refreshInterval, 5);
     assert.equal(M.config({ dockerEnabled: false }).dockerEnabled, false);
-    assert.deepEqual(clone(M.config({ visibleTabs: '' }).tabs), ['Localhost']);
+    assert.deepEqual(clone(M.config({ settingsVersion:2, visibleTabs: '' }).tabs), ['Localhost']);
     assert.equal(M.validateSettings({ refreshInterval: 'x' }).length > 0, true);
     assert.equal(M.validateSettings({ hiddenPorts: '80,3000-3010' }).length, 0);
     assert.equal(M.validateSettings({ hiddenPorts: '80;rm' }).length > 0, true);
@@ -104,7 +104,7 @@ test('poll scheduler never overlaps, slows down closed panels and defers invento
     assert.equal(M.nextScope(10000, true, cfg, {ports:10000}, false), 'docker');
     assert.equal(M.nextScope(10000, true, cfg, {ports:10000,docker:10000}, false), 'assets');
     assert.equal(M.nextScope(10000, false, cfg, {ports:5000,docker:5000}, false), '');
-    assert.equal(M.nextScope(10000, true, M.config({dockerEnabled:false}), {ports:10000}, false), '');
+    assert.equal(M.nextScope(10000, true, M.config({dockerEnabled:false}), {ports:10000,tools:10000,legacy:10000}, false), '');
 });
 
 test('database view includes stopped evidence and only configured SQLite files', () => {
@@ -157,7 +157,7 @@ test('slow port queries cannot starve never-queried Docker scopes', () => {
 
 test('overdue scopes keep making progress after their first query', () => {
     const cfg = M.config({refreshInterval:2});
-    const last = {ports:1000, docker:2000, assets:3000};
+    const last = {ports:1000, docker:2000, assets:3000, tools:70000, legacy:70000};
     const observed = [];
     for (let now = 70000; now <= 160000; now += 30000) {
         const scope = M.nextScope(now, true, cfg, last, false);
@@ -166,7 +166,7 @@ test('overdue scopes keep making progress after their first query', () => {
     }
     assert.deepEqual(observed, ['ports', 'docker', 'assets', 'ports']);
     assert.equal(M.nextScope(70000, false, cfg, {ports:70000,docker:70000}, false), '');
-    assert.equal(M.nextScope(70000, true, M.config({dockerEnabled:false}), {ports:70000}, false), '');
+    assert.equal(M.nextScope(70000, true, M.config({dockerEnabled:false}), {ports:70000,tools:70000,legacy:70000}, false), '');
 });
 
 test('zoned IPv4 listeners such as systemd-resolved do not reject the whole response', () => {
@@ -255,7 +255,7 @@ test('durations, tab counts and the header summary stay compact', () => {
     const state = {ports:[port(), {...port(5432), database:'PostgreSQL'}],
         containers:[container(), {...container(), id:'b'.repeat(64), name:'db', state:'exited', publishedPorts:[]}],
         images:[{id:'i',tags:['a:b'],used:true,size:'1MB'}], volumes:[]};
-    assert.deepEqual(clone(M.counts(state, M.config({}))), {Localhost:2, Docker:2, Images:1, Databases:1});
+    assert.deepEqual(clone(M.counts(state, M.config({}))), {Overview:0, Localhost:2, Docker:2, Images:1, Databases:1, Projects:0, Tools:0});
     assert.equal(M.summary(state, M.config({})), '2 listening · 1 of 2 containers running');
     assert.equal(M.summary(state, M.config({dockerEnabled:false})), '2 listening');
     assert.equal(M.summary({ports:[port()]}, M.config({})), '1 listening');
@@ -294,7 +294,7 @@ test('empty states say why the list is empty', () => {
     assert.match(M.emptyText('Docker', '', 'running', '', true), /Nothing matches this filter/);
     assert.match(M.emptyText('Localhost', '', 'all', '', true), /Nothing is listening/);
     assert.match(M.emptyText('Databases', '', 'all', '', true), /SQLite/);
-    assert.deepEqual(clone(M.tabNames.map(M.tabLabel)), ['Ports', 'Docker', 'Images', 'Databases']);
+    assert.deepEqual(clone(M.tabNames.map(M.tabLabel)), ['Overview', 'Ports', 'Docker', 'Images', 'DBs', 'Projects', 'AI']);
 });
 
 test('logs are limited by what Python sends, so astral characters are not rejected', () => {
@@ -323,4 +323,153 @@ test('badge colours come from the theme palette with readable fallbacks', () => 
     assert.ok(Object.values(fallback).every(c => /^#[0-9a-f]{6}$/i.test(c)));
     assert.equal(M.palette('red = "#ff0000"\ncolor1 = "bad"').red, '#ff0000');
     assert.equal(M.palette(undefined).blue, fallback.blue);
+});
+
+const project = (p = '/work/project', extra = {}) => ({id:'project:'+p, path:p, name:p.split('/').pop(), root:'/work', branch:'main', detached:false, ahead:1, behind:2, changed:0, untracked:0, conflicts:0, gitState:'clean', ...extra});
+const tool = (id = 'claude', available = true) => ({id, name:id, builtin:true, executable:id, path:available?'/bin/'+id:null, available, reason:available?'':'not found', args:[]});
+const envelope = (kind, data, extra = {}) => JSON.stringify({schemaVersion:1, kind, ok:true, errors:[], data, ...extra});
+
+test('dashboard identity, fixed tab keys and versioned visibility migration', () => {
+    assert.equal(M.pluginId, 'io.github.batuhanmeral.development-dashboard');
+    assert.equal(M.legacyPluginId, 'io.github.batuhanmeral.devports');
+    assert.equal(M.displayName, 'Development Dashboard');
+    assert.deepEqual(clone(M.config({visibleTabs:'Localhost,Docker'}).tabs), ['Overview','Localhost','Docker','Projects','Tools']);
+    assert.deepEqual(clone(M.config({settingsVersion:2,visibleTabs:'Docker,Tools'}).tabs), ['Docker','Tools']);
+    for (let n=0;n<7;n++) assert.equal(M.tabKey(String(n)), M.tabNames[n]);
+    assert.equal(M.tabKey('2', M.config({settingsVersion:2,visibleTabs:'Localhost'})), '');
+    assert.equal(M.tabKey('9'), '');
+    assert.equal(M.config({}).managementEnabled, false);
+    assert.equal(M.config({}).projectDepth, 3);
+});
+
+test('dashboard settings validate roots, bounds, editor and custom grammar', () => {
+    assert.equal(M.validateSettings({projectRoots:'/work\n/home/u/projects',projectDepth:4,terminal:'kitty',customTools:'Aider | aider | --no-auto-commits'}).length,0);
+    for (const invalid of [{projectRoots:'relative'}, {projectRoots:'/proc/x'}, {projectRoots:'/a\0b'}, {projectRoots:Array(17).fill('/x').join('\n')}, {projectDepth:5}, {projectDepth:1.2}, {terminal:'sh'}, {editor:'x'.repeat(257)}, {editor:'code\n--wait'}, {favoriteProjects:'relative'}, {customTools:'bad | sh; rm'}])
+        assert.ok(M.validateSettings(invalid).length, JSON.stringify(invalid));
+    const cfg = M.config({projectDepth:99,terminal:'invalid',projectRoots:'/work',managementEnabled:true});
+    assert.equal(cfg.projectDepth,3); assert.equal(cfg.terminal,'default'); assert.equal(cfg.managementEnabled,true);
+    assert.equal(M.parseCustomTools('# ignored\nAider | aider | --token $(id) {path}')[0].args.join(' '), '--token $(id) {path}');
+    for (const line of ['Name | ../exec','Name | /a/../exec', 'Name | $(id)', 'Name | exe | '+Array(17).fill('a').join(' '), 'Name | exe | a\0b','Name | exe | a | b'])
+        assert.throws(()=>M.parseCustomTools(line),line);
+    const old=M.legacySettings({refreshInterval:9, compact:false, evil:'x',managementEnabled:true});
+    assert.equal(old.refreshInterval,9); assert.equal(old.compact,false); assert.equal(old.managementEnabled,false); assert.equal(old.evil,undefined);
+    assert.equal(M.legacySettings({refreshInterval:'9'}).refreshInterval,5);
+});
+
+test('decode isolates new scopes and rejects forged project and tool identities', () => {
+    assert.equal(M.decode(envelope('projects',{projects:[project()],skipped:2}), 'projects').data.skipped,2);
+    assert.equal(M.decode(envelope('tools',{tools:[tool()]}),'tools').data.tools.length,1);
+    assert.equal(M.decode(envelope('legacy',{legacy:{found:true,installed:false,settings:{compact:false}}}),'legacy').data.legacy.found,true);
+    for (const p of [project('relative'),project('/a',{id:'project:/b'}), project('/a\nb')])
+        assert.throws(()=>M.decode(envelope('projects',{projects:[p]}),'projects'));
+    assert.throws(()=>M.decode(envelope('tools',{tools:[tool('$(id)')]}),'tools'));
+    assert.throws(()=>M.decode(envelope('projects',{ports:[port()]}),'projects'));
+    assert.throws(()=>M.decode(envelope('ports',{projects:[project()]}),'ports'));
+    assert.throws(()=>M.decode(envelope('projects',{projects:[project(),project()]}),'projects'));
+    assert.equal(M.decodeAction(envelope('action',{state:'running'},{action:'docker-start'})).action,'docker-start');
+    for (const raw of [envelope('ports',{}), envelope('action',[],{action:'x'}), envelope('action',{}, {action:2})]) assert.throws(()=>M.decodeAction(raw));
+    const next=M.merge({}, {projects:[project()],tools:[tool()],legacy:{found:false},skipped:1});
+    assert.equal(next.projects.length,1); assert.equal(next.tools.length,1); assert.equal(next.skipped,1);
+});
+
+test('project services associate longest path only and respect path boundaries', () => {
+    const state={projects:[project('/a/b'),project('/a/b/nested'),project('/a/bc')],ports:[{...port(),cwd:'/a/b/nested/src'},{...port(4000),cwd:'/a/bc/src'}],containers:[{...container(),publishedPorts:[],composeDir:'/a/b/docker'}]};
+    const cfg=M.config({});
+    const ports=M.rows(state,'Localhost','','all',cfg);
+    assert.equal(ports[0].projectPath,'/a/b/nested'); assert.equal(ports[1].projectPath,'/a/bc');
+    const svc=M.projectServices(state,'/a/b',cfg);
+    assert.equal(svc.length,1); assert.equal(svc[0].kind,'container');
+    assert.equal(M.projectServices(state,'/a/b/nested',cfg).length,1);
+    assert.equal(M.projectServices(state,'/a',cfg).length,0);
+});
+
+test('project and tool rows filter, search and put favorites first', () => {
+    const state={projects:[project('/work/a'),project('/work/z',{gitState:'dirty',changed:2}),project('/work/b',{branch:'feature'})],tools:[tool(),tool('codex',false)],ports:[port()]};
+    const cfg=M.config({favoriteProjects:'/work/z'});
+    assert.equal(M.rows(state,'Projects','','all',cfg)[0].title,'z');
+    assert.equal(M.rows(state,'Projects','','favorites',cfg).length,1);
+    assert.equal(M.rows(state,'Projects','','dirty',cfg)[0].badge,'main*');
+    assert.equal(M.rows(state,'Projects','feature','all',cfg)[0].title,'b');
+    assert.equal(M.rows(state,'Tools','','available',cfg).length,1);
+    assert.equal(M.rows(state,'Tools','codex','all',cfg)[0].badge,'missing');
+    assert.equal(M.toggleFavorite(cfg,'/work/z'),'');
+    assert.equal(M.toggleFavorite(cfg,'/work/a'),'/work/z\n/work/a');
+    assert.match(M.emptyText('Projects','','all','',false,M.config({})),/No project folders yet/);
+    assert.match(M.emptyText('Projects','','all','',false,M.config({projectRoots:'/work'})),/Scanning projects/);
+});
+
+test('overview counts inventory and limits favorite and exposed lists', () => {
+    const state={projects:[project()],tools:[tool(),tool('codex',false)],ports:[port(),{...port(5432,'0.0.0.0'),database:'PostgreSQL'}],containers:[{...container(),publishedPorts:[],health:'unhealthy'}]};
+    const cfg=M.config({favoriteProjects:'/work/project'});
+    const o=M.overview(state,cfg);
+    assert.equal(o.listening.total,2);assert.equal(o.listening.exposed,1);
+    assert.deepEqual(clone(o.containers),{running:1,total:1,unhealthy:1});
+    assert.equal(o.databases,1);assert.equal(o.projects.total,1);assert.equal(o.projects.favorites,1);
+    assert.deepEqual(clone(o.aiTools),{available:1,total:2});
+    assert.equal(o.favorites[0].serviceCount,2);assert.equal(o.exposed.length,1);
+    assert.equal(M.overview({...state,ports:Array.from({length:8},(_,i)=>port(8000+i,'0.0.0.0'))},cfg).exposed.length,5);
+    const facts=M.facts(M.rows(state,'Projects','','all',cfg)[0],0);
+    assert.match(facts.find(f=>f.label==='Branch').value,/1.*2/);
+    assert.equal(facts.find(f=>f.label==='Services').value,'2');
+});
+
+test('management is opt in and never terminates container or unowned listeners', () => {
+    const cfg=M.config({managementEnabled:true});
+    const c=M.viewRow(container(),'container');
+    assert.deepEqual(clone(M.availableActions(c,M.config({}),{}).map(a=>a.id)),['logs','open']);
+    for (const id of ['stop','restart']) assert.ok(M.availableActions(c,cfg,{}).find(a=>a.id===id).confirm);
+    assert.ok(M.availableActions(M.viewRow({...container(),state:'exited'},'container'),cfg,{}).some(a=>a.id==='start'));
+    const p=M.viewRow({...port(),ownedByUser:true,startTicks:'123'},'port');
+    assert.equal(M.canManage(p,cfg),true); assert.equal(M.canManage(p,M.config({})),false);
+    for (const extra of [{ownedByUser:false},{containerName:'web'},{containerIds:[cid]},{pid:null},{startTicks:null}])
+        assert.equal(M.canManage(M.viewRow({...port(),ownedByUser:true,startTicks:'123',...extra},'port'),cfg),false);
+    assert.ok(M.availableActions(M.viewRow(project(),'project'),cfg,{}).some(a=>a.key==='F'));
+});
+
+test('actions use separate validated argv entries for every operation', () => {
+    const cfg=M.config({projectRoots:'/work\n/home/me',terminal:'kitty',editor:'code --wait',customTools:'Test | tool | $(id)'});
+    for(const op of ['start','stop','restart']) assert.deepEqual(clone(M.actionArgs(op,container(),cfg,{})),['docker-'+op,'--container-id',cid]);
+    assert.equal(M.actionArgs('stop',{id:';rm'},cfg,{}),null);
+    assert.deepEqual(clone(M.actionArgs('terminate',{...port(),ownedByUser:true,startTicks:'123'},cfg,{})),['process-terminate','--pid','100','--start-ticks','123','--port','3000']);
+    for(const p of [{...port(),pid:1,startTicks:'1'}, {...port(),startTicks:'x'}]) assert.equal(M.actionArgs('terminate',p,cfg,{}),null);
+    const base=['--path','/work/project','--project-root','/work','--project-root','/home/me'];
+    assert.deepEqual(clone(M.actionArgs('terminal',project(),cfg,{})),['open-terminal',...base,'--terminal','kitty']);
+    assert.deepEqual(clone(M.actionArgs('editor',project(),cfg,{})),['open-editor',...base,'--editor','code --wait']);
+    assert.deepEqual(clone(M.actionArgs('files',project(),cfg,{})),['open-files',...base]);
+    assert.deepEqual(clone(M.actionArgs('launch-tool',tool(),cfg,{path:'/work/project'})),['launch-tool',...base,'--tool','claude','--terminal','kitty','--custom-tool','Test | tool | $(id)']);
+    for(const p of ['relative','/work/../outside','/work/a\nfoo','/work2/app']) assert.equal(M.actionArgs('terminal',project(p),cfg,{}),null,p);
+    const weird='/work/$(id);name';
+    assert.equal(M.actionArgs('terminal',project(weird),cfg,{})[2],weird);
+    assert.equal(M.actionArgs('evil',project(),cfg,{}),null);
+});
+
+test('confirmation strings preserve names as plain data and explain SIGTERM', () => {
+    assert.equal(M.confirmText('stop',M.viewRow(container(),'container')),'Stop container “web”?');
+    assert.equal(M.confirmText('restart',M.viewRow(container(),'container')),'Restart container “web”?');
+    assert.match(M.confirmText('terminate',M.viewRow({...port(5173),pid:4242},'port')),/Send SIGTERM to vite \(PID 4242\) on port 5173\? It will not be force-killed\./);
+    assert.equal(M.confirmText('stop',M.viewRow({...container(),name:'<img src=x>'},'container')),'Stop container “<img src=x>”?');
+});
+
+test('open dashboard schedules new scopes and legacy is only collected once', () => {
+    const cfg=M.config({projectRoots:'/work'});
+    const last={ports:10000,docker:10000,assets:10000};
+    assert.equal(M.nextScope(10000,true,cfg,last,false),'projects');last.projects=10000;
+    assert.equal(M.nextScope(10000,true,cfg,last,false),'tools');last.tools=10000;
+    assert.equal(M.nextScope(10000,true,cfg,last,false),'legacy');last.legacy=10000;
+    assert.equal(M.nextScope(10000,true,cfg,last,false),'');
+    assert.equal(M.nextScope(10000,false,cfg,{},false),'ports');
+    assert.equal(M.nextScope(4000000,true,M.config({dockerEnabled:false}),{ports:4000000,tools:4000000,legacy:1},false),'');
+});
+
+test('project paths reject invalid UTF-16 and accept the longest contract path', () => {
+    const long='/'+ 'a'.repeat(4095);
+    assert.equal(M.decode(envelope('projects',{projects:[project(long)]}),'projects').data.projects[0].path,long);
+    assert.equal(M.actionArgs('terminal',project('/work/\ud800'),M.config({projectRoots:'/work'}),{}),null);
+});
+
+test('process start ticks retain their string identity at the frontend boundary', () => {
+    const cfg=M.config({managementEnabled:true});
+    const numeric={...port(),ownedByUser:true,startTicks:123};
+    assert.equal(M.canManage(M.viewRow(numeric,'port'),cfg),false);
+    assert.equal(M.actionArgs('terminate',numeric,cfg,{}),null);
 });

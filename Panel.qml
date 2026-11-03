@@ -1,7 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as QQC
-import QtQuick.Layouts
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
@@ -12,8 +11,8 @@ import "Model.js" as Model
 // arrive through `hostWidget`.
 Ui.Panel {
     id: root
-    moduleName: "io.github.batuhanmeral.devports"
-    ipcTarget: "io.github.batuhanmeral.devports"
+    moduleName: Model.pluginId
+    ipcTarget: Model.pluginId
 
     readonly property var hostBar: bar
     property Item anchorItem: null
@@ -25,6 +24,17 @@ Ui.Panel {
     // "list", "detail", "logs" or "settings".
     property string view: "list"
     property int cursor: 0
+    property string toolProject: ""
+    property var confirmation: null
+    readonly property bool confirming: confirmation !== null
+    readonly property bool operating: !!hostWidget && hostWidget.operation.running
+    readonly property var projectOptions: Model.rows(inventory, "Projects", "", "all", cfg).map(function (p) {
+        return {
+            value: p.projectPath,
+            label: (p.favorite ? "★ " : "") + p.title + " · " + p.projectPath
+        };
+    })
+    readonly property var entries: listModel
     property string selectedId: ""
     property var selectedRow: ({})
     property double now: Date.now() / 1000
@@ -64,6 +74,11 @@ Ui.Panel {
         return tone === "urgent" ? statusColors.red : tone === "warn" ? statusColors.yellow : tone === "ok" ? statusColors.green : tone === "info" ? statusColors.blue : dim;
     }
 
+    function focusKeys() {
+        if (surface.loadedContent)
+            surface.loadedContent.forceActiveFocus();
+    }
+
     function switchPanel(direction) {
         return root.bar && typeof root.hostBar.switchPanelFrom === "function" ? root.hostBar.switchPanelFrom(root.hostWidget || root, direction) : false;
     }
@@ -76,10 +91,95 @@ Ui.Panel {
         if (index < 0 || index >= visibleRows.length)
             return;
         cursor = index;
+        if (tab === "Tools") {
+            launchTool(visibleRows[index]);
+            return;
+        }
         selectedRow = visibleRows[index];
         selectedId = selectedRow.id;
         now = Date.now() / 1000;
         view = "detail";
+    }
+
+    function launchTool(row) {
+        if (!toolProject || !projectOptions.some(function (p) {
+            return p.value === root.toolProject;
+        })) {
+            hostWidget.notify("Choose a project before launching an AI tool.", true);
+            return;
+        }
+        var raw = Model.rawRow(row);
+        if (!raw.available) {
+            hostWidget.notify(raw.reason || "This tool is not available.", true);
+            return;
+        }
+        hostWidget.runOperation("launch-tool", row, {
+            path: toolProject
+        });
+    }
+
+    function requestAction(action, row) {
+        row = row || (view === "list" ? visibleRows[cursor] : selectedRow);
+        if (!row || operating || confirming)
+            return;
+        if (action.id === "copy") {
+            hostWidget.copyText(row.copyText);
+            return;
+        }
+        if (action.id === "favorite") {
+            hostWidget.saveSettings({
+                settingsVersion: 2,
+                favoriteProjects: Model.toggleFavorite(cfg, row.projectPath)
+            });
+            return;
+        }
+        if (action.id === "ai") {
+            toolProject = row.projectPath;
+            selectTab("Tools");
+            return;
+        }
+        if (action.id === "logs") {
+            selectedRow = row;
+            selectedId = row.id;
+            showLogs();
+            return;
+        }
+        if (action.id === "open") {
+            hostWidget.openUrl(JSON.parse(action.raw), "http");
+            return;
+        }
+        // Check availability again: shortcuts and stale buttons cannot bypass management settings.
+        var available = Model.availableActions(row, cfg, inventory).some(function (a) {
+            return a.id === action.id;
+        });
+        if (!available)
+            return;
+        if (action.confirm)
+            confirmation = {
+                op: action.id,
+                row: row,
+                message: Model.confirmText(action.id, row)
+            };
+        else
+            hostWidget.runOperation(action.id, row, {});
+    }
+
+    function confirmAction() {
+        var pending = confirmation;
+        confirmation = null;
+        if (pending && hostWidget)
+            hostWidget.runOperation(pending.op, pending.row, {});
+    }
+
+    function shortcut(key) {
+        var row = view === "list" ? visibleRows[cursor] : selectedRow;
+        if (!row || (view !== "list" && view !== "detail"))
+            return;
+        var action = Model.availableActions(row, cfg, inventory).filter(function (a) {
+            return a.key === key;
+        })[0];
+        if (action)
+            requestAction(action, row);
     }
 
     function showLogs() {
@@ -139,6 +239,12 @@ Ui.Panel {
             hostWidget.openUrl(selectedRawRow, scheme);
     }
 
+    onProjectOptionsChanged: {
+        if (!projectOptions.some(function (p) {
+            return p.value === root.toolProject;
+        }))
+            toolProject = projectOptions.length ? projectOptions[0].value : "";
+    }
     onCfgChanged: {
         if (cfg.tabs.indexOf(tab) < 0)
             selectTab(cfg.tabs[0]);
@@ -161,6 +267,8 @@ Ui.Panel {
         }
     }
     onOpenedChanged: {
+        if (!opened)
+            confirmation = null;
         if (opened)
             now = Date.now() / 1000;
         else if (view === "logs" || view === "settings")
@@ -203,26 +311,6 @@ Ui.Panel {
         font.pixelSize: root.fonts.body
     }
 
-    component Badge: Ui.BorderSurface {
-        id: badge
-        property string text: ""
-        property color tint: root.dim
-        implicitWidth: badgeLabel.implicitWidth + Style.space(12)
-        implicitHeight: badgeLabel.implicitHeight + Style.space(4)
-        radius: Style.cornerRadius
-        color: Util.alpha(tint, 0.16)
-        border.width: 1
-        border.color: Util.alpha(tint, 0.6)
-        Label {
-            id: badgeLabel
-            anchors.centerIn: parent
-            text: badge.text
-            color: badge.tint
-            font.pixelSize: root.fonts.caption
-            font.bold: true
-        }
-    }
-
     Ui.KeyboardPanel {
         id: surface
         anchorItem: root.anchorItem
@@ -230,7 +318,7 @@ Ui.Panel {
         bar: root.bar
         open: root.opened
         focusTarget: surface.loadedContent
-        contentWidth: surface.fittedContentWidth(Style.space(460))
+        contentWidth: surface.fittedContentWidth(Style.space(560))
         contentHeight: surface.fittedContentHeight(surface.loadedContentHeight, Style.space(800))
 
         content: Component {
@@ -238,7 +326,7 @@ Ui.Panel {
                 id: keys
                 objectName: "keys"
                 implicitHeight: column.implicitHeight
-                blocked: search.activeFocus || settingsForm.editing
+                blocked: root.confirming || listPage.searchField.activeFocus || settingsForm.editing || projectPicker.popupOpen
 
                 // A view change hides whatever input had focus; keys belong to the panel again.
                 Connections {
@@ -262,7 +350,7 @@ Ui.Panel {
                 onMoveRequested: function (dx, dy) {
                     if (root.view === "list" && dy !== 0) {
                         root.moveCursor(dy);
-                        list.positionViewAtIndex(root.cursor, ListView.Contain);
+                        listPage.listView.positionViewAtIndex(root.cursor, ListView.Contain);
                     } else if (root.view === "list") {
                         root.stepTab(dx);
                     } else if (dx < 0 && root.view !== "settings") {
@@ -271,11 +359,14 @@ Ui.Panel {
                         root.showLogs();
                     }
                 }
+                onDeleteRequested: root.shortcut("x")
                 onActivateRequested: {
                     if (root.view === "list")
                         root.openDetail(root.cursor);
                 }
                 onTextKey: function (key, modifiers) {
+                    if (modifiers & Qt.ShiftModifier)
+                        key = key.toUpperCase();
                     if (modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier) || root.view === "settings")
                         return;
                     if (key === "r")
@@ -283,13 +374,15 @@ Ui.Panel {
                     else if (key === "c")
                         root.copyCurrent();
                     else if (key === "/" && root.view === "list")
-                        search.forceActiveFocus();
+                        listPage.searchField.forceActiveFocus();
                     else if (key === "o" && root.view === "detail" && root.selectedRow.url)
                         root.openCurrent("");
                     else if (key === "s")
                         root.toggleSettings();
-                    else if (key >= "1" && key <= "4")
-                        root.selectTab(root.cfg.tabs[Number(key) - 1] || "");
+                    else if (Model.tabKey(key, root.cfg))
+                        root.selectTab(Model.tabKey(key, root.cfg));
+                    else
+                        root.shortcut(key);
                 }
 
                 Flickable {
@@ -341,14 +434,14 @@ Ui.Panel {
                                 spacing: Style.space(2)
                                 Label {
                                     width: parent.width
-                                    text: root.view === "settings" ? "Development Ports settings" : "Development Ports"
+                                    text: Model.displayName + (root.view === "settings" ? " settings" : "")
                                     font.pixelSize: root.fonts.title
                                     font.bold: true
                                     elide: Text.ElideRight
                                 }
                                 Label {
                                     width: parent.width
-                                    text: Model.summary(root.inventory, root.cfg).toUpperCase()
+                                    text: Model.tagline
                                     color: root.dim
                                     font.pixelSize: root.fonts.caption
                                     font.bold: true
@@ -422,7 +515,7 @@ Ui.Panel {
                                     Ui.Button {
                                         required property string modelData
                                         width: (tabRow.width - tabRow.spacing * (root.cfg.tabs.length - 1)) / root.cfg.tabs.length
-                                        text: Model.tabLabel(modelData) + (root.sampled ? " " + (root.counts[modelData] || 0) : "")
+                                        text: Model.tabLabel(modelData) + (root.sampled && modelData !== "Overview" ? " " + (root.counts[modelData] || 0) : "")
                                         selected: root.tab === modelData
                                         bordered: true
                                         foreground: root.foreground
@@ -431,385 +524,43 @@ Ui.Panel {
                                 }
                             }
 
-                            Item {
+                            OverviewPage {
                                 width: parent.width
-                                implicitHeight: Math.max(search.implicitHeight, filterGroup.implicitHeight)
-                                Ui.TextField {
-                                    id: search
-                                    objectName: "search"
-                                    anchors.left: parent.left
-                                    anchors.right: filterGroup.left
-                                    anchors.rightMargin: root.gaps.lg
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    placeholderText: "Search  ( / )"
-                                    foreground: root.foreground
-                                    // Typing breaks a plain binding, so follow resets explicitly.
-                                    Connections {
-                                        target: root
-                                        function onQueryChanged() {
-                                            if (search.text !== root.query)
-                                                search.text = root.query;
-                                        }
-                                    }
-                                    onTextEdited: {
-                                        root.query = text;
-                                        root.cursor = 0;
-                                    }
-                                    Keys.onEscapePressed: {
-                                        if (text !== "")
-                                            root.query = "";
-                                        else
-                                            keys.forceActiveFocus();
-                                    }
-                                    Keys.onReturnPressed: keys.forceActiveFocus()
-                                    Keys.onEnterPressed: keys.forceActiveFocus()
-                                    Keys.onDownPressed: keys.forceActiveFocus()
-                                }
-                                Ui.ButtonGroup {
-                                    id: filterGroup
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: root.gaps.sm
-                                    focusable: false
-                                    options: Model.filters(root.tab)
-                                    value: root.filter
-                                    foreground: root.foreground
-                                    fontSize: root.fonts.bodySmall
-                                    onChanged: function (value) {
-                                        root.filter = value;
-                                        root.cursor = 0;
-                                    }
+                                visible: root.tab === "Overview"
+                                panel: root
+                            }
+                            Ui.Dropdown {
+                                id: projectPicker
+                                objectName: "projectPicker"
+                                width: parent.width
+                                visible: root.tab === "Tools"
+                                label: "Launch in project"
+                                value: root.toolProject
+                                options: root.projectOptions
+                                foreground: root.foreground
+                                onChanged: function (value) {
+                                    root.toolProject = value;
                                 }
                             }
-
-                            // A Docker problem that still leaves rows to show, e.g. missing CPU figures.
                             Label {
                                 width: parent.width
-                                visible: root.tab !== "Localhost" && root.dockerNotice !== "" && listModel.count > 0
-                                text: root.dockerNotice
+                                visible: root.tab === "Tools" && !root.projectOptions.length
+                                text: "No project available. Add project folders in settings (s)."
                                 color: root.dim
-                                font.pixelSize: root.fonts.bodySmall
                                 wrapMode: Text.WordWrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
                             }
-
-                            ListView {
-                                id: list
+                            ListPage {
+                                id: listPage
                                 width: parent.width
-                                height: Math.min(contentHeight, Style.space(376))
-                                visible: listModel.count > 0
-                                clip: true
-                                model: listModel
-                                spacing: Style.space(2)
-                                reuseItems: true
-                                boundsBehavior: Flickable.StopAtBounds
-                                flickableDirection: Flickable.VerticalFlick
-                                interactive: contentHeight > height
-                                QQC.ScrollBar.vertical: QQC.ScrollBar {
-                                    policy: QQC.ScrollBar.AsNeeded
-                                }
-
-                                delegate: Ui.CursorSurface {
-                                    id: rowItem
-                                    required property int index
-                                    required property string lead
-                                    required property string title
-                                    required property string subtitle
-                                    required property string badge
-                                    required property string tone
-                                    required property string copyText
-                                    width: list.width
-                                    implicitHeight: Style.space(root.cfg.compact ? 40 : 50)
-                                    hasCursor: root.cursor === index
-                                    foreground: root.foreground
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onContainsMouseChanged: if (containsMouse)
-                                            root.cursor = rowItem.index
-                                        onClicked: root.openDetail(rowItem.index)
-                                    }
-
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: root.gaps.xl
-                                        anchors.rightMargin: root.gaps.lg
-                                        spacing: root.gaps.xl
-
-                                        // Port number, or a state dot for rows that have none.
-                                        Item {
-                                            Layout.preferredWidth: rowItem.lead !== "" ? leadMetrics.advanceWidth : Style.space(7)
-                                            Layout.fillHeight: true
-                                            Label {
-                                                anchors.right: parent.right
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                visible: rowItem.lead !== ""
-                                                text: rowItem.lead
-                                                font.bold: true
-                                            }
-                                            Rectangle {
-                                                anchors.centerIn: parent
-                                                visible: rowItem.lead === ""
-                                                width: Style.space(7)
-                                                height: width
-                                                radius: width / 2
-                                                color: root.toneColor(rowItem.tone)
-                                            }
-                                        }
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            spacing: Style.space(1)
-                                            Label {
-                                                Layout.fillWidth: true
-                                                text: rowItem.title
-                                                elide: Text.ElideMiddle
-                                            }
-                                            Label {
-                                                Layout.fillWidth: true
-                                                text: rowItem.subtitle
-                                                color: root.dim
-                                                font.pixelSize: root.fonts.caption
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-                                        Badge {
-                                            text: rowItem.badge
-                                            tint: root.toneColor(rowItem.tone)
-                                        }
-                                        Ui.PanelActionButton {
-                                            // nf-md-content_copy
-                                            iconText: "\u{f018f}"
-                                            tooltipText: "Copy " + rowItem.copyText
-                                            foreground: root.foreground
-                                            opacity: rowItem.hasCursor ? 1 : 0
-                                            enabled: rowItem.hasCursor && rowItem.copyText !== ""
-                                            onClicked: root.hostWidget.copyText(rowItem.copyText)
-                                        }
-                                    }
-                                }
-                            }
-
-                            Item {
-                                width: parent.width
-                                visible: listModel.count === 0
-                                implicitHeight: Style.space(132)
-                                Label {
-                                    anchors.centerIn: parent
-                                    width: parent.width - Style.space(48)
-                                    horizontalAlignment: Text.AlignHCenter
-                                    wrapMode: Text.WordWrap
-                                    color: root.dim
-                                    text: Model.emptyText(root.tab, root.query, root.filter, root.dockerNotice, root.sampled)
-                                }
+                                visible: root.tab !== "Overview"
+                                panel: root
                             }
                         }
 
                         // ---- detail and logs ----------------------------------------------
-                        Column {
+                        DetailPage {
                             width: parent.width
-                            visible: root.view === "detail" || root.view === "logs"
-                            spacing: root.gaps.xl
-
-                            RowLayout {
-                                width: parent.width
-                                spacing: root.gaps.lg
-                                Ui.PanelActionButton {
-                                    // nf-md-arrow_left
-                                    iconText: "\u{f004d}"
-                                    tooltipText: root.view === "logs" ? "Back to details (Esc)" : "Back to the list (Esc)"
-                                    foreground: root.foreground
-                                    bordered: true
-                                    Layout.alignment: Qt.AlignVCenter
-                                    onClicked: root.back()
-                                }
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 0
-                                    spacing: Style.space(1)
-                                    Label {
-                                        Layout.fillWidth: true
-                                        text: (root.selectedRow.lead ? ":" + root.selectedRow.lead + "  " : "") + (root.selectedRow.title || "")
-                                        font.pixelSize: root.fonts.subtitle
-                                        font.bold: true
-                                        elide: Text.ElideMiddle
-                                    }
-                                    Label {
-                                        Layout.fillWidth: true
-                                        text: root.view === "logs" ? "Last 100 log lines" : root.selectedRow.subtitle || ""
-                                        color: root.dim
-                                        font.pixelSize: root.fonts.caption
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                                Badge {
-                                    Layout.alignment: Qt.AlignVCenter
-                                    text: root.selectedRow.badge || ""
-                                    tint: root.toneColor(root.selectedRow.tone || "dim")
-                                }
-                            }
-
-                            Ui.PanelSeparator {
-                                foreground: root.foreground
-                            }
-
-                            // Facts: click a value to copy it.
-                            Column {
-                                width: parent.width
-                                visible: root.view === "detail"
-                                spacing: Style.space(2)
-                                Repeater {
-                                    model: root.selectedFacts
-                                    Ui.CursorSurface {
-                                        id: fact
-                                        required property var modelData
-                                        width: parent.width
-                                        implicitHeight: Math.max(factValue.implicitHeight, factLabel.implicitHeight) + root.gaps.lg
-                                        hasCursor: factMouse.containsMouse && fact.modelData.copy !== ""
-                                        foreground: root.foreground
-                                        MouseArea {
-                                            id: factMouse
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: fact.modelData.copy !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                            onClicked: if (fact.modelData.copy !== "")
-                                                root.hostWidget.copyText(fact.modelData.copy)
-                                        }
-                                        Label {
-                                            id: factLabel
-                                            anchors.left: parent.left
-                                            anchors.leftMargin: root.gaps.lg
-                                            anchors.top: parent.top
-                                            anchors.topMargin: root.gaps.sm
-                                            width: Style.space(132)
-                                            text: fact.modelData.label
-                                            color: root.dim
-                                            elide: Text.ElideRight
-                                        }
-                                        Label {
-                                            id: factValue
-                                            anchors.left: factLabel.right
-                                            anchors.right: copyHint.left
-                                            anchors.rightMargin: root.gaps.md
-                                            anchors.top: parent.top
-                                            anchors.topMargin: root.gaps.sm
-                                            text: fact.modelData.value
-                                            wrapMode: Text.WrapAnywhere
-                                        }
-                                        Label {
-                                            id: copyHint
-                                            anchors.right: parent.right
-                                            anchors.rightMargin: root.gaps.lg
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            // nf-md-content_copy
-                                            text: "\u{f018f}"
-                                            color: root.dim
-                                            opacity: fact.hasCursor ? 1 : 0
-                                        }
-                                    }
-                                }
-                            }
-
-                            Flow {
-                                width: parent.width
-                                visible: root.view === "detail"
-                                spacing: root.gaps.md
-                                Ui.Button {
-                                    visible: !!root.selectedRow.url
-                                    text: "Open in browser"
-                                    // nf-md-open_in_new
-                                    iconText: "\u{f03cc}"
-                                    bordered: true
-                                    selected: true
-                                    foreground: root.foreground
-                                    onClicked: root.openCurrent("")
-                                }
-                                Ui.Button {
-                                    visible: root.canOpenAs
-                                    text: "Open as HTTP"
-                                    bordered: true
-                                    foreground: root.foreground
-                                    onClicked: root.openCurrent("http")
-                                }
-                                Ui.Button {
-                                    visible: root.canOpenAs
-                                    text: "Open as HTTPS"
-                                    bordered: true
-                                    foreground: root.foreground
-                                    onClicked: root.openCurrent("https")
-                                }
-                                Ui.Button {
-                                    visible: !!root.selectedRow.copyText
-                                    text: root.selectedRow.url ? "Copy URL" : root.selectedRow.kind === "port" ? "Copy address" : "Copy name"
-                                    iconText: "\u{f018f}"
-                                    bordered: true
-                                    foreground: root.foreground
-                                    onClicked: root.copyCurrent()
-                                }
-                                Ui.Button {
-                                    visible: !!root.selectedRow.containerId && root.cfg.dockerEnabled
-                                    text: "View logs"
-                                    // nf-md-text_box_outline
-                                    iconText: "\u{f09ed}"
-                                    bordered: true
-                                    foreground: root.foreground
-                                    onClicked: root.showLogs()
-                                }
-                            }
-
-                            Flickable {
-                                id: logFlick
-                                width: parent.width
-                                height: Style.space(360)
-                                visible: root.view === "logs"
-                                contentWidth: width
-                                contentHeight: logText.implicitHeight
-                                clip: true
-                                boundsBehavior: Flickable.StopAtBounds
-                                QQC.ScrollBar.vertical: QQC.ScrollBar {
-                                    policy: QQC.ScrollBar.AsNeeded
-                                }
-                                // New output lands at the bottom, where the newest lines are.
-                                onContentHeightChanged: contentY = Math.max(0, contentHeight - height)
-                                TextEdit {
-                                    id: logText
-                                    readonly property var logs: root.hostWidget ? root.hostWidget.logs : null
-                                    width: logFlick.width - root.gaps.lg
-                                    readOnly: true
-                                    selectByMouse: true
-                                    textFormat: TextEdit.PlainText
-                                    wrapMode: TextEdit.WrapAnywhere
-                                    color: logs && logs.failed ? root.urgent : logs && logs.loading ? root.dim : root.foreground
-                                    selectionColor: Style.selectionFillFor(root.foreground, root.accent)
-                                    selectedTextColor: root.foreground
-                                    font.family: root.fontFamily
-                                    font.pixelSize: root.fonts.bodySmall
-                                    text: !logs ? "" : logs.loading ? "Loading…" : logs.text !== "" ? logs.text : "No log output."
-                                }
-                            }
-
-                            RowLayout {
-                                width: parent.width
-                                visible: root.view === "logs"
-                                spacing: root.gaps.lg
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: "Logs can contain secrets. Nothing is saved to disk."
-                                    color: root.dim
-                                    font.pixelSize: root.fonts.caption
-                                    wrapMode: Text.WordWrap
-                                }
-                                Ui.Button {
-                                    text: "Reload"
-                                    iconText: "\u{f0450}"
-                                    bordered: true
-                                    foreground: root.foreground
-                                    onClicked: root.showLogs()
-                                }
-                            }
+                            panel: root
                         }
 
                         // ---- settings -----------------------------------------------------
@@ -822,6 +573,11 @@ Ui.Panel {
                                 load()
                             foreground: root.foreground
                             values: root.hostWidget ? root.hostWidget.settings : ({})
+                            legacy: root.inventory.legacy || ({})
+                            onCopyRequested: function (text) {
+                                if (root.hostWidget)
+                                    root.hostWidget.copyText(text);
+                            }
                             onSaveRequested: function (values) {
                                 if (root.hostWidget && root.hostWidget.saveSettings(values))
                                     root.back();
@@ -836,7 +592,11 @@ Ui.Panel {
                         Label {
                             width: parent.width
                             readonly property bool hasMessage: !!root.hostWidget && root.hostWidget.message !== ""
-                            text: hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + "↵ details · / search · c copy · s settings" : root.view === "settings" ? "Changes apply when saved · Esc cancels" : root.view === "logs" ? "Esc back to details" : "Esc back · click a value to copy it" + (root.selectedRow.containerId && root.cfg.dockerEnabled ? " · → logs" : "")
+                            text: root.operating ? root.hostWidget.operation.label : hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + (root.tab === "Tools" ? "↵ launch in project" : root.tab === "Overview" ? "0–6 tabs" : "↵ details · / search · c copy") + " · s settings" : root.view === "settings" ? "Changes apply when saved · Esc cancels" : root.view === "logs" ? "Esc back to details" : "Esc back · " + Model.availableActions(root.selectedRow, root.cfg, root.inventory).filter(function (a) {
+                                return a.key;
+                            }).map(function (a) {
+                                return a.key + " " + a.label.toLowerCase();
+                            }).join(" · ") + (root.selectedRow.containerId && root.cfg.dockerEnabled ? " · → logs" : "")
                             color: hasMessage && root.hostWidget.messageUrgent ? root.urgent : root.dim
                             font.pixelSize: root.fonts.caption
                             elide: Text.ElideRight
@@ -846,12 +606,19 @@ Ui.Panel {
                     }
                 }
 
-                TextMetrics {
-                    id: leadMetrics
-                    font.family: root.fontFamily
-                    font.pixelSize: root.fonts.body
-                    font.bold: true
-                    text: "65535"
+                ConfirmSheet {
+                    anchors.fill: parent
+                    opened: root.confirming
+                    message: root.confirmation ? root.confirmation.message : ""
+                    foreground: root.foreground
+                    onCanceled: {
+                        root.confirmation = null;
+                        keys.forceActiveFocus();
+                    }
+                    onConfirmed: {
+                        root.confirmAction();
+                        keys.forceActiveFocus();
+                    }
                 }
             }
         }
