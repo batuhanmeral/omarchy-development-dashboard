@@ -5,16 +5,20 @@ import QtQml
 QtObject {
     property string text: ""
     property string containerId: ""
+    property bool truncated: false
     property bool loading: false
     property bool failed: false
     property int generation: 0
 
-    function begin(id) {
+    function begin(id, retain) {
         generation++;
+        if (!retain || containerId !== id || failed) {
+            text = "";
+            truncated = false;
+            failed = false;
+        }
         containerId = id;
-        text = "";
         loading = true;
-        failed = false;
         return generation;
     }
 
@@ -22,6 +26,7 @@ QtObject {
         generation++;
         text = "";
         containerId = "";
+        truncated = false;
         loading = false;
         failed = false;
     }
@@ -31,7 +36,8 @@ QtObject {
             return false;
         loading = false;
         failed = !result.ok;
-        text = result.ok ? result.data.text + (result.data.truncated ? "\n[truncated]" : "") : result.errors.join("\n");
+        truncated = result.ok && result.data.truncated === true;
+        text = result.ok ? result.data.text : result.errors.join("\n");
         return true;
     }
 
@@ -40,6 +46,7 @@ QtObject {
             return false;
         loading = false;
         failed = true;
+        truncated = false;
         text = message;
         return true;
     }

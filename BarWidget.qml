@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell.Io
+import qs.Commons as Commons
 import qs.Ui as Ui
 import "Model.js" as Model
 
@@ -44,7 +45,17 @@ Ui.BarWidget {
     readonly property int serviceCount: counts.Localhost
     readonly property string errorText: Model.barError(errors)
     readonly property bool hasError: errorText !== ""
+    readonly property var badgeAttention: cfg.statusBadge ? Model.attention(inventory, cfg) : ({
+            unhealthy: 0,
+            exposed: 0
+        })
     readonly property string backendPath: decodeURIComponent(String(Qt.resolvedUrl("backend/collector.py")).replace(/^file:\/\//, ""))
+
+    Commons.Translations {
+        id: strings
+        directory: Qt.resolvedUrl("i18n")
+        onStringsChanged: Qt.callLater(root.updateTooltip)
+    }
 
     function open() {
         if (panelLoader.item)
@@ -80,7 +91,14 @@ Ui.BarWidget {
     }
 
     function updateTooltip() {
-        tooltip = hasError ? Model.displayName + "\n" + errorText : Model.displayName + " · " + Model.summary(inventory, cfg);
+        var reasons = [];
+        if (badgeAttention.unhealthy)
+            reasons.push(strings.tn("badge.unhealthy", badgeAttention.unhealthy).arg(badgeAttention.unhealthy));
+        if (badgeAttention.exposed)
+            reasons.push(strings.tn("badge.exposed", badgeAttention.exposed).arg(badgeAttention.exposed));
+        tooltip = hasError ? Model.displayName + "\n" + errorText : Model.displayName + " · " + Model.summary(inventory, cfg, strings);
+        if (reasons.length)
+            tooltip += "\n" + reasons.join(" · ");
     }
 
     function notify(text, urgent) {
@@ -116,12 +134,14 @@ Ui.BarWidget {
         poll();
     }
 
-    function requestLogs(containerId) {
+    function requestLogs(containerId, retain) {
         if (!opened || !cfg.dockerEnabled || !/^[a-f0-9]{64}$/.test(containerId))
+            return;
+        if (retain && logState.loading)
             return;
         pendingLogs = {
             id: containerId,
-            token: logState.begin(containerId)
+            token: logState.begin(containerId, retain)
         };
         poll();
     }
@@ -131,7 +151,7 @@ Ui.BarWidget {
         logState.clear();
     }
 
-    function start(scope, logRequest) {
+    function start(scope, request) {
         var args = ["python3", backendPath, scope];
         if (!cfg.dockerEnabled && ["ports", "docker", "assets", "logs"].indexOf(scope) >= 0)
             args.push("--no-docker");
@@ -151,19 +171,19 @@ Ui.BarWidget {
             }).forEach(function (path) {
                 args.push("--sqlite-file=" + path.trim());
             });
-        if (logRequest)
-            args.push("--container-id=" + logRequest.id);
+        if (scope === "logs")
+            args.push("--container-id=" + request.id);
         job = {
             scope: scope,
             generation: generation,
-            logToken: logRequest ? logRequest.token : 0,
+            logToken: scope === "logs" ? request.token : 0,
             raw: undefined,
             exitCode: -1,
             exited: false,
             streamed: false,
             timedOut: false
         };
-        if (!logRequest)
+        if (!request)
             lastPoll = Object.assign({}, lastPoll, {
                 [scope]: Date.now()
             });
@@ -204,13 +224,13 @@ Ui.BarWidget {
     }
 
     function saveSettings(values) {
-        var problems = Model.validateSettings(values);
+        var problems = Model.validateSettings(values, strings);
         if (problems.length) {
             notify(problems.join("\n"), true);
             return false;
         }
         if (!bar || !hostBar.shell || typeof hostBar.shell.updateEntryInline !== "function") {
-            notify("This bar cannot store plugin settings.", true);
+            notify(strings.t("message.settingsUnsupported"), true);
             return false;
         }
         var entry = Object.assign({}, root.settings, {
@@ -222,11 +242,11 @@ Ui.BarWidget {
         if (JSON.stringify(entry) === JSON.stringify(root.settings))
             return true;
         if (hostBar.shell.updateEntryInline(moduleName, entry) === false) {
-            notify("The shell could not save these settings.", true);
+            notify(strings.t("message.settingsFailed"), true);
             return false;
         }
         root.settings = entry;
-        notify("Settings saved.", false);
+        notify(strings.t("message.settingsSaved"), false);
         return true;
     }
 
@@ -242,26 +262,29 @@ Ui.BarWidget {
     function runOperation(op, view, context) {
         if (operation.running)
             return false;
-        if (["start", "stop", "restart", "terminate", "docker-start", "docker-stop", "docker-restart", "process-terminate"].indexOf(op) >= 0 && !Model.canManage(view, cfg))
+        if (["start", "stop", "restart", "terminate", "docker-start", "docker-stop", "docker-restart", "compose-start", "compose-stop", "compose-restart", "docker-compose-start", "docker-compose-stop", "docker-compose-restart", "process-terminate"].indexOf(op) >= 0 && !Model.canManage(view, cfg))
             return false;
         var args = Model.actionArgs(op, view, cfg, context);
         if (!args) {
-            notify("Invalid operation arguments.", true);
+            notify(strings.t("message.invalidOperation"), true);
             return false;
         }
         var titles = {
-            "docker-start": "Starting",
-            "docker-stop": "Stopping",
-            "docker-restart": "Restarting",
-            "process-terminate": "Stopping",
-            "open-terminal": "Opening terminal for",
-            "open-editor": "Opening editor for",
-            "open-files": "Opening files for",
-            "launch-tool": "Launching"
+            "docker-start": strings.t("progress.start"),
+            "docker-stop": strings.t("progress.stop"),
+            "docker-restart": strings.t("progress.restart"),
+            "docker-compose-start": strings.t("progress.start"),
+            "docker-compose-stop": strings.t("progress.stop"),
+            "docker-compose-restart": strings.t("progress.restart"),
+            "process-terminate": strings.t("progress.stop"),
+            "open-terminal": strings.t("progress.terminal"),
+            "open-editor": strings.t("progress.editor"),
+            "open-files": strings.t("progress.files"),
+            "launch-tool": strings.t("progress.launch")
         };
         operation = {
             op: args[0],
-            label: (titles[args[0]] || "Running") + " " + (view.title || Model.rawRow(view).name || "project") + "…",
+            label: (titles[args[0]] || strings.t("progress.running")).arg(view.title || Model.rawRow(view).name || strings.t("progress.project")),
             running: true
         };
         operationJob = {
@@ -273,6 +296,7 @@ Ui.BarWidget {
             timedOut: false
         };
         operationProcess.command = ["python3", actionsPath].concat(args);
+        operationWatchdog.interval = args[0].startsWith("docker-compose-") ? 125000 : 45000;
         operationWatchdog.restart();
         operationProcess.running = true;
         return true;
@@ -301,17 +325,20 @@ Ui.BarWidget {
             if (!result.ok || done.exitCode !== 0)
                 throw new Error(result.errors.join("\n") || "Operation failed (exit " + done.exitCode + ").");
             const labels = {
-                "docker-start": "Started container.",
-                "docker-stop": "Stopped container.",
-                "docker-restart": "Restarted container.",
-                "open-terminal": "Opened terminal.",
-                "open-editor": "Opened editor.",
-                "open-files": "Opened files.",
-                "launch-tool": "Launched AI tool."
+                "docker-start": strings.t("message.containerStarted"),
+                "docker-stop": strings.t("message.containerStopped"),
+                "docker-restart": strings.t("message.containerRestarted"),
+                "docker-compose-start": strings.t("message.composeStarted"),
+                "docker-compose-stop": strings.t("message.composeStopped"),
+                "docker-compose-restart": strings.t("message.composeRestarted"),
+                "open-terminal": strings.t("message.terminalOpened"),
+                "open-editor": strings.t("message.editorOpened"),
+                "open-files": strings.t("message.filesOpened"),
+                "launch-tool": strings.t("message.toolLaunched")
             };
-            notify(done.op === "process-terminate" ? result.data.result === "signaled" ? "Sent SIGTERM; the process is still running. It was not force-killed." : result.data.result === "already-exited" ? "The process has already exited." : "Process terminated." : labels[done.op] || "Operation completed.", false);
+            notify(done.op === "process-terminate" ? result.data.result === "signaled" ? strings.t("message.processSignaled") : result.data.result === "already-exited" ? strings.t("message.processExited") : strings.t("message.processTerminated") : labels[done.op] || strings.t("message.completed"), false);
         } catch (error) {
-            notify("Invalid or failed operation: " + error.message, true);
+            notify(strings.t("message.operationFailed").arg(error.message), true);
         }
         if (done.op.indexOf("docker-") === 0)
             lastPoll = Object.assign({}, lastPoll, {
@@ -475,7 +502,7 @@ Ui.BarWidget {
         onTriggered: {
             if (action.running)
                 action.signal(9);
-            root.notify(root.actionName + " timed out.", true);
+            root.notify((root.actionName === "Copy" ? strings.t("message.copyTimeout") : strings.t("message.openTimeout")), true);
         }
     }
     Process {
@@ -486,9 +513,9 @@ Ui.BarWidget {
         onExited: function (exitCode, exitStatus) {
             actionWatchdog.stop();
             if (exitCode === 0)
-                root.notify(root.actionName === "Copy" ? "Copied to clipboard." : "Opened in browser.", false);
+                root.notify(root.actionName === "Copy" ? strings.t("message.copied") : strings.t("message.browserOpened"), false);
             else
-                root.notify(root.actionName + " failed. Is " + (root.actionName === "Copy" ? "wl-copy" : "xdg-open") + " installed?", true);
+                root.notify(root.actionName === "Copy" ? strings.t("message.copyFailed") : strings.t("message.openFailed"), true);
         }
     }
     Timer {
@@ -561,10 +588,11 @@ Ui.BarWidget {
     }
     Ui.BarIconButton {
         id: button
+        objectName: "statusIcon"
         anchors.fill: parent
         bar: root.bar
         text: Model.icon
-        active: root.hasError
+        active: root.hasError || root.badgeAttention.unhealthy > 0 || root.badgeAttention.exposed > 0
         tooltipText: root.tooltip
         onPressed: function (buttonCode) {
             if (buttonCode === Qt.LeftButton)

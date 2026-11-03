@@ -110,6 +110,7 @@ class ProjectsTests(unittest.TestCase):
                 )
 
         runner = Fake()
+        self.repo(self.root)
         result = self.p.git_status(self.root, runner)
         self.assertEqual(
             result,
@@ -131,11 +132,13 @@ class ProjectsTests(unittest.TestCase):
                 "git",
                 "--no-optional-locks",
                 "-c",
-                "core.fsmonitor=false",
+                "protocol.allow=never",
                 "-c",
-                "core.untrackedCache=false",
+                "core.fsmonitor=false",
                 "-C",
                 str(self.root),
+                "-c",
+                "core.untrackedCache=false",
                 "status",
                 "--porcelain=v2",
                 "--branch",
@@ -210,7 +213,9 @@ class ProjectsTests(unittest.TestCase):
         (project / ".env").write_text(
             "PORT=3000\nDB_PORT='5432'\nPASSWORD=private\nBAD_PORT=65536\n"
         )
-        (project / ".env.local").write_text("export PORT=4000 # local\n")
+        (project / ".env.local").write_text(
+            "export PORT=004000 # local\n_PORT=004001\n" + "MALFORMED_PORT=\"5000'\n"
+        )
         (project / ".env.development").write_bytes(b"PORT=1000\n\xff")
         (project / "package.json").write_text(
             json.dumps(
@@ -234,6 +239,7 @@ class ProjectsTests(unittest.TestCase):
                 (3000, ".env"),
                 (5432, ".env"),
                 (4000, ".env.local"),
+                (4001, ".env.local"),
                 (5173, "package.json"),
                 (9090, "package.json"),
                 (8080, "package.json"),
@@ -259,3 +265,107 @@ class ProjectsTests(unittest.TestCase):
             [entry["port"] for entry in result["data"]["projects"][0]["expectedPorts"]],
             list(range(9000, 9016)),
         )
+
+    def test_project_preview_scope_is_no_longer_available(self):
+        result = c.collect("project-detail")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errors"], ["unsupported scope"])
+
+    def test_project_git_commands_apply_offline_controls_to_config_and_status(self):
+        project = self.repo(self.root / "app")
+
+        class Fake:
+            calls = []
+
+            def run(_, argv, **kwargs):
+                _.calls.append((argv, kwargs))
+                return ""
+
+        runner = Fake()
+        self.p.git_status(project, runner)
+        self.assertEqual(len(runner.calls), 2)
+        for argv, kwargs in runner.calls:
+            self.assertIn("protocol.allow=never", argv)
+            self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+            self.assertEqual(kwargs["env"]["GIT_ALLOW_PROTOCOL"], "")
+            self.assertEqual(kwargs["env"]["GIT_CEILING_DIRECTORIES"], str(self.root))
+
+    def test_project_git_commands_require_an_own_repository_marker(self):
+        parent = self.repo(self.root / "parent")
+        child = parent / "child"
+        child.mkdir()
+
+        class Fake:
+            def run(self, argv, **kwargs):
+                raise AssertionError("Git must not run for a nested non-repository directory")
+
+        for marker_type in ("missing", "symlink"):
+            with self.subTest(marker_type=marker_type):
+                if marker_type == "symlink":
+                    (child / ".git").symlink_to(parent / ".git")
+                self.assertEqual(self.p.git_status(child, Fake())["gitState"], "unknown")
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_status_preflight_includes_worktree_local_configuration(self):
+        def git(*argv):
+            subprocess.run(["git", "-C", str(self.root), *argv], check=True, capture_output=True)
+
+        git("init", "--quiet")
+        git("config", "--local", "extensions.worktreeConfig", "true")
+        git("config", "--worktree", "filter.fixture.required", "false")
+        self.assertEqual(self.p.git_status(self.root, c.Runner())["gitState"], "unknown")
+
+
+class LazyFetchExploitTests(unittest.TestCase):
+    """A promisor repository with a missing object must not make Git run its configured commands."""
+
+    def make_repo(self, root: Path, marker: Path) -> Path:
+        repo = root / "repo"
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            ).stdout.strip()
+
+        repo.mkdir()
+        git("init", "-q")
+        (repo / "f.txt").write_text("a\n")
+        blob = git("hash-object", "-w", "f.txt")
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},f.txt")
+        tree = git("write-tree")
+        # Plumbing only: no commit hooks run, so the user's global hooks never see this fixture.
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        first = git(*identity, "commit-tree", tree, "-m", "test: first")
+        second = git(*identity, "commit-tree", tree, "-p", first, "-m", "test: second")
+        git("update-ref", "refs/heads/main", second)
+        git("symbolic-ref", "HEAD", "refs/heads/main")
+        git("config", "extensions.partialClone", "origin")
+        git("config", "remote.origin.promisor", "true")
+        git("config", "remote.origin.url", "ssh://example.invalid/x")
+        git("config", "core.sshCommand", f"touch {marker}")
+        (repo / ".git/objects" / second[:2] / second[2:]).unlink()
+        return repo
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_status_and_detail_do_not_run_repository_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "PWNED"
+            repo = self.make_repo(root, marker)
+            # The fixture is only meaningful if plain Git really runs the command.
+            subprocess.run(
+                ["git", "-C", str(repo), "log", "-1"],
+                capture_output=True,
+                env=dict(os.environ, GIT_TERMINAL_PROMPT="0"),
+                check=False,
+            )
+            self.assertTrue(marker.exists(), "fixture no longer reproduces the lazy fetch")
+            marker.unlink()
+            projects = importlib.import_module("projects")
+            projects.git_status(repo, c.Runner(budget=20))
+            self.assertFalse(marker.exists(), "git status ran a repository-configured command")

@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import qs.Commons as Commons
 import "../.." as Plugin
 import "../../Model.js" as Model
 
@@ -33,6 +34,7 @@ TestCase {
         id: entries
     }
     function cleanup() {
+        Commons.I18n.language = "en";
         saved.clear();
     }
     function createLogs() {
@@ -76,7 +78,8 @@ TestCase {
             },
             errors: []
         }));
-        compare(logs.text, "current log content\n[truncated]");
+        compare(logs.text, "current log content");
+        verify(logs.truncated);
         compare(logs.containerId, "b".repeat(64));
     }
     function test_logErrorsReplaceLoadingText() {
@@ -127,6 +130,22 @@ TestCase {
         verify(!logs.failed);
         compare(logs.text, "");
     }
+    function test_settingsStatusBadgeIsSavedWithDraft() {
+        const form = createTemporaryObject(settingsComponent, suite);
+        verify(form !== null);
+        const badgeToggle = findChild(form, "statusBadge");
+        verify(badgeToggle !== null);
+        compare(badgeToggle.checked, false);
+        badgeToggle.clicked();
+        compare(badgeToggle.checked, true);
+        let saved = null;
+        form.saveRequested.connect(function (values) {
+            saved = values;
+        });
+        form.submit();
+        verify(saved.statusBadge);
+    }
+
     function test_settingsRoundTrip() {
         const form = createTemporaryObject(settingsComponent, suite);
         verify(form !== null);
@@ -172,7 +191,9 @@ TestCase {
         form.toggleTab("Docker");
         form.submit();
         compare(saved.count, 0);
-        verify(form.validationError.indexOf("tab") >= 0);
+        compare(form.validationError, "Select at least one tab.");
+        Commons.I18n.language = "tr";
+        tryCompare(form, "validationError", "En az bir sekme seçin.");
         form.load();
         compare(form.validationError, "");
         compare(form.tabs.join(","), "Localhost,Docker");

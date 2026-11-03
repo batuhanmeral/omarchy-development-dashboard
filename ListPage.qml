@@ -9,6 +9,7 @@ import "Model.js" as Model
 Column {
     id: root
     required property var panel
+    readonly property var strings: panel.translations
     readonly property alias searchField: search
     readonly property alias listView: list
     spacing: panel.gaps.lg
@@ -49,7 +50,7 @@ Column {
             anchors.right: filterGroup.left
             anchors.rightMargin: root.panel.gaps.lg
             anchors.verticalCenter: parent.verticalCenter
-            placeholderText: "Search  ( / )"
+            placeholderText: root.strings.t("list.search")
             foreground: root.panel.foreground
             // Typing breaks a plain binding, so follow resets explicitly.
             Connections {
@@ -79,7 +80,7 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             spacing: root.panel.gaps.sm
             focusable: false
-            options: Model.filters(root.panel.tab)
+            options: Model.filters(root.panel.tab, root.strings)
             value: root.panel.filter
             foreground: root.panel.foreground
             fontSize: root.panel.fonts.bodySmall
@@ -192,7 +193,7 @@ Column {
                 Ui.PanelActionButton {
                     // nf-md-content_copy
                     iconText: "\u{f018f}"
-                    tooltipText: "Copy " + rowItem.copyText
+                    tooltipText: root.strings.t("list.copy").arg(rowItem.copyText)
                     foreground: root.panel.foreground
                     opacity: rowItem.hasCursor ? 1 : 0
                     enabled: rowItem.hasCursor && rowItem.copyText !== ""
@@ -213,7 +214,7 @@ Column {
             wrapMode: Text.WordWrap
             color: root.panel.dim
             objectName: "emptyState"
-            text: Model.emptyText(root.panel.tab, root.panel.query, root.panel.filter, root.panel.scopeNotice, root.panel.tab === "Projects" ? root.panel.inventory.projects !== undefined : root.panel.tab === "Tools" ? root.panel.inventory.tools !== undefined : root.panel.sampled, root.panel.cfg)
+            text: Model.emptyText(root.panel.tab, root.panel.query, root.panel.filter, root.panel.scopeNotice, root.panel.tab === "Projects" ? root.panel.inventory.projects !== undefined : root.panel.tab === "Tools" ? root.panel.inventory.tools !== undefined : root.panel.sampled, root.panel.cfg, root.strings)
         }
     }
 

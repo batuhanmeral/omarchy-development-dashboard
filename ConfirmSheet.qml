@@ -5,6 +5,8 @@ Item {
     id: root
     property bool opened: false
     property string message: ""
+    required property string cancelLabel
+    required property string confirmLabel
     property color foreground: "white"
     signal canceled
     signal confirmed
@@ -30,8 +32,8 @@ Item {
         opened: root.opened
         selectedIndex: 0
         message: root.message
-        cancelText: "Cancel"
-        confirmText: "Confirm"
+        cancelText: root.cancelLabel
+        confirmText: root.confirmLabel
         foreground: root.foreground
         onCanceled: root.canceled()
         onConfirmed: root.confirmed()

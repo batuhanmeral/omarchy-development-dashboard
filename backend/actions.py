@@ -27,7 +27,7 @@ from collector import (
     local_docker,
 )
 from launch import detect_tools, editor_argv, resolve_executable, terminal_argv
-from projects import validate_root
+from projects import project_directory as project_directory
 
 CRITICAL = {
     "systemd",
@@ -70,6 +70,9 @@ CRITICAL = {
     "avahi-daemon",
     "bluetoothd",
 }
+DOCKER_OPERATIONS = ("docker-start", "docker-stop", "docker-restart")
+COMPOSE_OPERATIONS = ("docker-compose-start", "docker-compose-stop", "docker-compose-restart")
+COMPOSE_PROJECT = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 CHANGED = "The process changed since the list was loaded (PID reused). Refresh and try again."
 
 
@@ -82,13 +85,19 @@ def docker_action(
     operation: str, container_id: str, runner: CommandRunner | None = None
 ) -> dict[str, Any]:
     require_user()
-    if operation not in ("docker-start", "docker-stop", "docker-restart"):
+    if operation not in DOCKER_OPERATIONS:
         raise CollectionError("unsupported Docker operation")
     if not ID_PATTERN.fullmatch(container_id):
         raise CollectionError("invalid container ID")
     runner = runner or Runner(budget=45)
+    return docker_member(operation, container_id, runner)
+
+
+def docker_member(
+    operation: str, container_id: str, runner: CommandRunner, prefix: list[str] | None = None
+) -> dict[str, Any]:
     try:
-        prefix = local_docker(runner) + ["container"]
+        prefix = prefix or (local_docker(runner) + ["container"])
         inspect = prefix + ["inspect", "--format", "{{json .State.Status}}", container_id]
         if not isinstance(json.loads(runner.run(inspect)), str):
             raise ValueError
@@ -103,6 +112,48 @@ def docker_action(
         raise CollectionError(docker_error(exc)) from exc
     except (ValueError, TypeError) as exc:
         raise CollectionError("invalid Docker state") from exc
+
+
+def docker_compose_action(
+    operation: str, project: str, container_ids: list[str], runner: CommandRunner | None = None
+) -> dict[str, Any]:
+    require_user()
+    if operation not in COMPOSE_OPERATIONS:
+        raise CollectionError("unsupported Compose operation")
+    if not COMPOSE_PROJECT.fullmatch(project):
+        raise CollectionError("invalid Compose project")
+    if not 1 <= len(container_ids) <= 64 or any(
+        not ID_PATTERN.fullmatch(member) for member in container_ids
+    ):
+        raise CollectionError("Invalid Compose container selection")
+    selected = set(container_ids)
+    runner = runner or Runner(budget=120)
+    try:
+        prefix = local_docker(runner) + ["container"]
+        raw = runner.run(
+            prefix
+            + ["ls", "-aq", "--no-trunc", "--filter=label=com.docker.compose.project=" + project]
+        )
+    except CollectionError as exc:
+        raise CollectionError(docker_error(exc)) from exc
+    members = list(dict.fromkeys(raw.split()))
+    if len(members) > 64:
+        raise CollectionError("Compose project container limit exceeded (64)")
+    if any(not ID_PATTERN.fullmatch(member) for member in members):
+        raise CollectionError("invalid container ID")
+    members = [member for member in members if member in selected]
+    if not members:
+        raise CollectionError("No containers of this Compose project remain.")
+    containers = []
+    failed = []
+    member_operation = operation.replace("docker-compose-", "docker-", 1)
+    for member in members:
+        try:
+            result = docker_member(member_operation, member, runner, prefix)
+            containers.append(dict(id=member, state=result["state"]))
+        except CollectionError as exc:
+            failed.append(dict(id=member, error=str(exc)))
+    return dict(project=project, containers=containers, failed=failed)
 
 
 def proc_stat(directory: Path) -> tuple[str, int]:
@@ -219,21 +270,6 @@ def process_terminate(
         (close_fd or os.close)(fd)
 
 
-def project_directory(path: str, roots: list[str]) -> Path:
-    if ".." in Path(path).parts or len(roots) > 16:
-        raise CollectionError("path is not inside a project folder")
-    directory = validate_root(path)
-    resolved_roots = [validate_root(root) for root in roots]
-    if not any(directory == root or root in directory.parents for root in resolved_roots):
-        raise CollectionError("path is not inside a project folder")
-    try:
-        if directory.stat().st_uid != os.getuid():
-            raise CollectionError("The project folder is not owned by you")
-    except OSError as exc:
-        raise CollectionError("The project folder is not owned by you") from exc
-    return directory
-
-
 def spawn(argv: list[str], cwd: Path) -> None:
     try:
         child = subprocess.Popen(  # noqa: S603 — resolved executable and literal arguments
@@ -292,9 +328,13 @@ def launch_action(
 def main() -> int:
     parser = CLIParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
-    for operation in ("docker-start", "docker-stop", "docker-restart"):
+    for operation in DOCKER_OPERATIONS:
         command = commands.add_parser(operation)
         command.add_argument("--container-id", required=True)
+    for operation in COMPOSE_OPERATIONS:
+        command = commands.add_parser(operation)
+        command.add_argument("--project", required=True)
+        command.add_argument("--container-id", action="append", required=True)
     command = commands.add_parser("process-terminate")
     command.add_argument("--pid", type=int, required=True)
     command.add_argument("--start-ticks", required=True)
@@ -324,7 +364,18 @@ def main() -> int:
         schemaVersion=1, kind="action", action=args.operation, ok=True, errors=[], data={}
     )
     try:
-        if args.operation.startswith("docker-"):
+        if args.operation in COMPOSE_OPERATIONS:
+            data = docker_compose_action(args.operation, args.project, args.container_id)
+            result["data"] = data
+            if data["failed"]:
+                result.update(
+                    ok=False,
+                    errors=[
+                        f"{len(data['failed'])} Compose container operations failed.",
+                        *[item["id"][:12] + ": " + item["error"] for item in data["failed"][:31]],
+                    ],
+                )
+        elif args.operation in DOCKER_OPERATIONS:
             result["data"] = docker_action(args.operation, args.container_id)
         elif args.operation == "process-terminate":
             result["data"] = process_terminate(args.pid, args.start_ticks, args.port)

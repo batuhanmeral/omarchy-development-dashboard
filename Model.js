@@ -3,7 +3,6 @@
 var pluginId = "io.github.batuhanmeral.development-dashboard";
 var legacyPluginId = "io.github.batuhanmeral.devports";
 var displayName = "Development Dashboard";
-var tagline = "Your development environment, one panel.";
 var tabNames = ["Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
 var terminals = ["default", "alacritty", "foot", "ghostty", "kitty"];
 
@@ -30,14 +29,14 @@ function customLines(value) {
 
 function parseCustomTools(value) {
     var input = customLines(value);
-    if (input.length > 8) throw new Error("Use at most 8 custom AI tools.");
+    if (input.length > 8) throw validationFailure("validation.toolLimit", "Use at most 8 custom AI tools.");
     return input.map(function (line, index) {
         var parts = line.split("|").map(function (part) { return part.trim(); });
         var args = parts.length === 3 && parts[2] ? parts[2].split(/\s+/) : [];
         if (parts.length < 2 || parts.length > 3 || !parts[0] || parts[0].length > 48
                 || /[\x00-\x1f\x7f]/.test(line) || !(/^[A-Za-z0-9._+-]{1,64}$/.test(parts[1]) || validPath(parts[1]))
                 || args.length > 16 || args.some(function (arg) { return arg.length > 256; }))
-            throw new Error("Invalid custom tool definition on line " + (index + 1) + ".");
+            throw validationFailure("validation.toolLine", "Invalid custom tool definition on line %1.", [index + 1]);
         return { id: "custom-" + (index + 1), name: parts[0], executable: parts[1], args: args };
     });
 }
@@ -47,18 +46,44 @@ function plain(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function text(value) {
-    return value === undefined || value === null ? "Unknown" : String(value);
+
+// Work with the shell's translator when called from QML and retain an English default
+// for pure-model consumers. Substitute in one pass so literal % markers in names survive.
+function interpolate(pattern, args) {
+    return args ? pattern.replace(/%([1-9])/g, function (match, index) {
+        return index <= args.length ? String(args[index - 1]) : match;
+    }) : pattern;
+}
+
+function translate(strings, key, fallback, args) {
+    return interpolate(strings && typeof strings.t === "function" ? strings.t(key, fallback) : fallback, args);
+}
+
+function translateCount(strings, key, count, one, other, args) {
+    var fallback = count === 1 ? one : other;
+    return interpolate(strings ? strings.tn(key, count, fallback) : fallback, args);
+}
+
+function stateText(value, strings) {
+    // Docker and Git report stable state codes. Pass through other backend values.
+    var knownStates = ["running", "stopped", "created", "exited", "paused", "restarting",
+        "removing", "dead", "healthy", "unhealthy", "starting", "clean", "dirty", "unknown"];
+    if (!strings || knownStates.indexOf(value) < 0) return value;
+    return strings.t("state." + value, value);
+}
+
+function text(value, strings) {
+    return value === undefined || value === null ? translate(strings, "row.unknown", "Unknown") : String(value);
 }
 
 function portRanges(value) {
     if (!String(value || "").trim()) return [];
     return String(value).split(",").map(function (part) {
         var match = part.trim().match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
-        if (!match) throw new Error("Hidden ports must be ports or ranges separated by commas.");
+        if (!match) throw validationFailure("validation.portSyntax", "Hidden ports must be ports or ranges separated by commas.");
         var lo = Number(match[1]);
         var hi = match[2] ? Number(match[2]) : lo;
-        if (lo < 1 || hi > 65535 || lo > hi) throw new Error("Port range must be within 1–65535.");
+        if (lo < 1 || hi > 65535 || lo > hi) throw validationFailure("validation.portRange", "Port range must be within 1–65535.");
         return [lo, hi];
     });
 }
@@ -84,6 +109,7 @@ function config(raw) {
         sqliteFiles: typeof raw.sqliteFiles === "string" ? raw.sqliteFiles : "",
         settingsVersion: 2,
         managementEnabled: raw.managementEnabled === true,
+        statusBadge: raw.statusBadge === true,
         projectRoots: lines(raw.projectRoots).filter(validRoot).slice(0, 16).join("\n"),
         projectDepth: Number.isInteger(Number(raw.projectDepth)) && Number(raw.projectDepth) >= 1 && Number(raw.projectDepth) <= 4 ? Number(raw.projectDepth) : 3,
         terminal: terminals.indexOf(raw.terminal) >= 0 ? raw.terminal : "default",
@@ -92,29 +118,48 @@ function config(raw) {
     };
 }
 
-function validateSettings(raw) {
+function validationFailure(key, fallback, args) {
+    var error = new Error(interpolate(fallback, args));
+    error.issue = {key:key, fallback:fallback, args:args};
+    return error;
+}
+
+function validationIssues(raw) {
     var errors = [];
+    function add(key, fallback) { errors.push({key:key, fallback:fallback}); }
+    function capture(error) {
+        if (!error.issue) throw error;
+        errors.push(error.issue);
+    }
     if (raw.refreshInterval !== undefined) {
         var n = Number(raw.refreshInterval);
         if (!isFinite(n) || n < 2 || n > 120 || Math.floor(n) !== n)
-            errors.push("Refresh interval must be an integer from 2 to 120 seconds.");
+            add("validation.interval", "Refresh interval must be an integer from 2 to 120 seconds.");
     }
-    try { portRanges(raw.hiddenPorts); } catch (error) { errors.push(error.message); }
+    try { portRanges(raw.hiddenPorts); } catch (error) { capture(error); }
     if (raw.visibleTabs !== undefined && !tabNames.some(function (t) {
         return String(raw.visibleTabs).split(",").indexOf(t) !== -1;
-    })) errors.push("Select at least one tab.");
+    })) add("validation.tabs", "Select at least one tab.");
     var files = String(raw.sqliteFiles || "").split("\n").filter(function (f) { return f.trim(); });
     if (files.length > 32 || files.some(function (f) { return f.charAt(0) !== "/" || f.indexOf("\0") >= 0; }))
-        errors.push("SQLite needs at most 32 absolute file paths, one per line.");
+        add("validation.sqlite", "SQLite needs at most 32 absolute file paths, one per line.");
     if (lines(raw.projectRoots).length > 16 || lines(raw.projectRoots).some(function (p) { return !validRoot(p); }))
-        errors.push("Project folders need at most 16 absolute, permitted directory paths.");
+        add("validation.roots", "Project folders need at most 16 absolute, permitted directory paths.");
     if (raw.projectDepth !== undefined && (!Number.isInteger(Number(raw.projectDepth)) || Number(raw.projectDepth) < 1 || Number(raw.projectDepth) > 4))
-        errors.push("Scan depth must be an integer from 1 to 4.");
-    if (raw.terminal !== undefined && terminals.indexOf(raw.terminal) < 0) errors.push("Select a supported terminal.");
+        add("validation.depth", "Scan depth must be an integer from 1 to 4.");
+    if (raw.terminal !== undefined && terminals.indexOf(raw.terminal) < 0) add("validation.terminal", "Select a supported terminal.");
     if (raw.editor !== undefined && (typeof raw.editor !== "string" || raw.editor.length > 256 || /[\x00-\x1f\x7f]/.test(raw.editor)))
-        errors.push("Editor must be at most 256 characters without control characters.");
-    try { parseCustomTools(raw.customTools); } catch (error) { errors.push(error.message); }
+        add("validation.editor", "Editor must be at most 256 characters without control characters.");
+    try { parseCustomTools(raw.customTools); } catch (error) { capture(error); }
     return errors;
+}
+
+function validationMessages(issues, strings) {
+    return issues.map(function (issue) { return translate(strings, issue.key, issue.fallback, issue.args); });
+}
+
+function validateSettings(raw, strings) {
+    return validationMessages(validationIssues(raw), strings);
 }
 
 function legacySettings(raw) {
@@ -287,9 +332,9 @@ function known(value) {
     return value !== undefined && value !== null && value !== "" && value !== "Unknown";
 }
 
-function imageTags(row) {
+function imageTags(row, strings) {
     var tags = (row.tags || []).filter(function (tag) { return tag.indexOf("<none>") < 0; });
-    return tags.length ? tags.join(", ") : "untagged";
+    return tags.length ? tags.join(", ") : translate(strings, "row.untagged", "untagged");
 }
 
 function containerTone(row) {
@@ -299,7 +344,7 @@ function containerTone(row) {
 }
 
 // One list row. Every field is a primitive so it can live in a QML ListModel.
-function viewRow(row, kind, state, cfg, index) {
+function viewRow(row, kind, state, cfg, index, strings) {
     var view = { id: row.id, kind: kind, lead: "", title: "", subtitle: "", badge: "", tone: "dim",
         rowState: row.state || "", exposure: "", url: "", copyText: "", containerId: "", port: row.port || 0 };
     index = index || (state ? serviceIndex(state, cfg || config({})) : null);
@@ -316,66 +361,73 @@ function viewRow(row, kind, state, cfg, index) {
         view.title = row.name;
         view.subtitle = row.path;
         view.projectPath = row.path;
-        view.badge = (row.branch || "unknown") + (row.gitState === "dirty" ? "*" : "");
+        view.badge = (row.branch || stateText("unknown", strings)) + (row.gitState === "dirty" ? "*" : "");
         view.tone = row.conflicts ? "urgent" : row.gitState === "dirty" ? "warn" : row.gitState === "clean" ? "ok" : "dim";
         var conflicts = index ? portConflicts(state, row, cfg || config({}), index) : [];
         if (conflicts.length) {
             view.badge += " !";
-            view.tone = "warn";
+            if (view.tone !== "urgent") view.tone = "warn";
             view.portConflicts = conflicts.map(function (item) { return ":" + item.port + " · " + item.source + " · " + item.holder; }).join("\n");
         }
         view.copyText = row.path;
         words = [row.root, row.branch];
     } else if (kind === "tool") {
         view.title = row.name;
-        view.subtitle = row.available ? row.path || row.executable : row.reason || "not found";
-        view.badge = row.available ? "available" : "missing";
+        view.subtitle = row.available ? row.path || row.executable : row.reason || translate(strings, "row.notFound", "not found");
+        view.badge = row.available ? translate(strings, "row.available", "available") : translate(strings, "row.missing", "missing");
         view.tone = row.available ? "ok" : "dim";
         view.copyText = row.path || row.executable || "";
         words = [row.id, row.executable];
     } else if (kind === "port") {
         var address = addressText(row);
         view.lead = String(row.port);
-        view.title = row.containerName || (known(row.process) ? row.process : row.database || "Unknown process");
-        view.subtitle = [row.address, row.database, row.containerName ? "container"
+        view.title = row.containerName || (known(row.process) ? row.process : row.database || translate(strings, "row.unknownProcess", "Unknown process"));
+        view.subtitle = [row.address, row.database, row.containerName ? translate(strings, "row.container", "container")
             : row.pid ? "pid " + row.pid : null, row.containerName || !known(row.owner) ? null : row.owner]
             .filter(known).join(" · ");
         view.exposure = row.exposure || "";
-        view.badge = row.exposure === "localhost" ? "local" : row.exposure === "all" ? "exposed" : "lan";
+        view.badge = row.exposure === "localhost" ? translate(strings, "row.local", "local")
+            : row.exposure === "all" ? translate(strings, "row.exposed", "exposed") : translate(strings, "row.lan", "lan");
         view.tone = row.exposure === "localhost" ? "info" : row.exposure === "all" ? "urgent" : "warn";
         view.url = url(row);
         view.copyText = view.url || address;
         view.containerId = (row.containerIds || [])[0] || "";
         words = [address, row.process, row.cwd];
+    } else if (kind === "compose") {
+        view.title = row.name;
+        view.subtitle = translate(strings, "row.composeRunning", "%1/%2 running", [row.running, row.total]);
+        view.tone = row.tone;
+        view.badge = row.badge;
     } else if (kind === "container") {
         var published = (row.publishedPorts || []).map(function (p) { return ":" + p.port; })
             .filter(function (p, i, all) { return all.indexOf(p) === i; });
-        view.title = text(row.name);
+        view.title = text(row.name, strings);
         view.subtitle = [row.image, row.compose].concat(published).filter(known).join(" · ");
-        view.badge = row.health || row.state || "unknown";
+        view.badge = stateText(row.health || row.state || "unknown", strings);
         view.tone = containerTone(row);
         view.copyText = text(row.name);
         view.containerId = row.id;
         words = [row.id, row.database];
     } else if (kind === "image") {
-        view.title = imageTags(row);
-        view.subtitle = row.size || "Unknown size";
-        view.badge = row.used ? "in use" : "unused";
+        view.title = imageTags(row, strings);
+        view.subtitle = row.size || translate(strings, "row.unknownSize", "Unknown size");
+        view.badge = row.used ? translate(strings, "row.used", "in use") : translate(strings, "row.unused", "unused");
         view.tone = row.used ? "ok" : "dim";
-        view.copyText = view.title === "untagged" ? row.id : view.title.split(", ")[0];
+        var originalTags = imageTags(row);
+        view.copyText = originalTags === "untagged" ? row.id : originalTags.split(", ")[0];
         words = [row.id];
     } else if (kind === "volume") {
         var users = row.containers || [];
-        view.title = text(row.name);
-        view.subtitle = users.length ? users.join(", ") : "Not used by any container";
-        view.badge = users.length ? "attached" : "unattached";
+        view.title = text(row.name, strings);
+        view.subtitle = users.length ? users.join(", ") : translate(strings, "row.unusedVolume", "Not used by any container");
+        view.badge = users.length ? translate(strings, "row.attached", "attached") : translate(strings, "row.unattached", "unattached");
         view.tone = users.length ? "info" : "dim";
         view.copyText = text(row.name);
         words = [row.mountpoint].concat(row.destinations || []);
     } else {
-        view.title = text(row.name);
-        view.subtitle = text(row.path);
-        view.badge = row.state === "configured" ? "found" : "missing";
+        view.title = text(row.name, strings);
+        view.subtitle = text(row.path, strings);
+        view.badge = row.state === "configured" ? translate(strings, "row.found", "found") : translate(strings, "row.missing", "missing");
         view.tone = row.state === "configured" ? "ok" : "urgent";
         view.copyText = text(row.path);
         words = ["sqlite"];
@@ -387,121 +439,166 @@ function viewRow(row, kind, state, cfg, index) {
 }
 
 // Label/value pairs for the detail view. Unknown values are left out instead of printed.
-function facts(view, now) {
+function facts(view, now, strings) {
     var row;
     try { row = JSON.parse(view.raw); } catch (error) { return []; }
     if (!plain(row)) return [];
     var output = [];
-    function add(label, value, copy) {
+    function add(key, label, value, copy) {
         if (!known(value)) return;
-        output.push({ label: label, value: String(value), copy: String(copy === undefined ? value : copy) });
+        output.push({ label: translate(strings, key, label), value: String(value), copy: String(copy === undefined ? value : copy) });
     }
     if (view.kind === "port") {
-        add("Address", addressText(row));
-        add("Exposure", { localhost: "This machine only", lan: "Reachable on one network address",
-            all: "Reachable on every network interface" }[row.exposure]);
-        add("Process", known(row.process) ? row.process + (row.pid ? " (pid " + row.pid + ")" : "")
-            : "Not visible; owned by another user", known(row.process) ? row.process : "");
-        add("PID", row.pid);
-        add("Owner", row.owner);
-        add("Command", row.command);
-        add("Project", view.projectPath);
-        add("Working directory", row.cwd);
-        if (row.startedAt) add("Running for", duration(now - row.startedAt));
-        add("Container", row.containerName);
-        add("Database", row.database);
-        add("Container port", row.targetPort);
+        add("fact.address", "Address", addressText(row));
+        add("fact.exposure", "Exposure", { localhost: translate(strings, "exposure.local", "This machine only"), lan: translate(strings, "exposure.lan", "Reachable on one network address"),
+            all: translate(strings, "exposure.all", "Reachable on every network interface") }[row.exposure]);
+        add("fact.process", "Process", known(row.process) ? row.process + (row.pid ? " (pid " + row.pid + ")" : "")
+            : translate(strings, "fact.processHidden", "Not visible; owned by another user"), known(row.process) ? row.process : "");
+        add("fact.pid", "PID", row.pid);
+        add("fact.owner", "Owner", row.owner);
+        add("fact.command", "Command", row.command);
+        add("fact.project", "Project", view.projectPath);
+        add("fact.workingDirectory", "Working directory", row.cwd);
+        if (row.startedAt) add("fact.runningFor", "Running for", duration(now - row.startedAt));
+        add("fact.container", "Container", row.containerName);
+        add("fact.database", "Database", row.database);
+        add("fact.containerPort", "Container port", row.targetPort);
     } else if (view.kind === "container") {
-        add("Name", row.name);
-        add("Image", row.image);
-        add("State", row.health ? row.state + " (" + row.health + ")" : row.state);
-        add("CPU", row.cpu);
-        add("Memory", row.memory);
-        add("Restart policy", row.restart);
-        add("Compose project", row.compose);
-        add("Published", (row.publishedPorts || []).map(addressText).join(", "));
-        add("Database", row.database);
-        add("Exposed ports", (row.exposedPorts || []).join(", "));
-        add("Compose directory", row.composeDir);
-        add("Project", view.projectPath);
-        add("ID", String(row.id).slice(0, 12), row.id);
+        add("fact.name", "Name", row.name);
+        add("fact.image", "Image", row.image);
+        add("fact.state", "State", row.health ? stateText(row.state, strings) + " (" + stateText(row.health, strings) + ")" : stateText(row.state, strings));
+        add("fact.cpu", "CPU", row.cpu);
+        add("fact.memory", "Memory", row.memory);
+        add("fact.restartPolicy", "Restart policy", row.restart);
+        add("fact.composeProject", "Compose project", row.compose);
+        add("fact.published", "Published", (row.publishedPorts || []).map(addressText).join(", "));
+        add("fact.database", "Database", row.database);
+        add("fact.exposed", "Exposed ports", (row.exposedPorts || []).join(", "));
+        add("fact.composeDirectory", "Compose directory", row.composeDir);
+        add("fact.project", "Project", view.projectPath);
+        add("fact.id", "ID", String(row.id).slice(0, 12), row.id);
     } else if (view.kind === "project") {
-        add("Path", row.path);
-        add("Branch", (row.branch || "unknown") + (row.detached ? " (detached)" : "") + " · " + (row.ahead || 0) + " ahead / " + (row.behind || 0) + " behind");
-        add("Working tree", row.gitState + " · " + (row.changed || 0) + " changed · " + (row.untracked || 0) + " untracked · " + (row.conflicts || 0) + " conflicts");
-        add("Root", row.root);
-        add("Services", view.serviceCount || 0);
-        add("Port conflicts", view.portConflicts);
+        add("fact.path", "Path", row.path);
+        add("fact.branch", "Branch", (row.branch || stateText("unknown", strings)) + (row.detached ? " (" + translate(strings, "fact.detached", "detached") + ")" : "") + " · " + translate(strings, "fact.branchDistance", "%1 ahead / %2 behind", [row.ahead || 0, row.behind || 0]));
+        var conflicts = row.conflicts || 0;
+        var treeCounts = translateCount(strings, "fact.workingTreeCounts", conflicts,
+            "%1 changed · %2 untracked · %3 conflict", "%1 changed · %2 untracked · %3 conflicts",
+            [row.changed || 0, row.untracked || 0, conflicts]);
+        add("fact.workingTree", "Working tree", stateText(row.gitState, strings) + " · " + treeCounts);
+        add("fact.root", "Root", row.root);
+        add("fact.services", "Services", view.serviceCount || 0);
+        add("fact.portConflicts", "Port conflicts", view.portConflicts);
     } else if (view.kind === "tool") {
-        add("Executable", row.executable); add("Path", row.path); add("Status", row.available ? "Available" : row.reason || "not found");
+        add("fact.executable", "Executable", row.executable); add("fact.path", "Path", row.path); add("fact.status", "Status", row.available ? translate(strings, "fact.available", "Available") : row.reason || translate(strings, "row.notFound", "not found"));
     } else if (view.kind === "image") {
-        add("Tags", imageTags(row));
-        add("Size", row.size);
-        add("Usage", row.used ? "Used by a container" : "Not used by any container");
-        add("ID", String(row.id).slice(0, 19), row.id);
+        add("fact.tags", "Tags", imageTags(row, strings));
+        add("fact.size", "Size", row.size);
+        add("fact.usage", "Usage", row.used ? translate(strings, "fact.imageUsed", "Used by a container") : translate(strings, "fact.imageUnused", "Not used by any container"));
+        add("fact.id", "ID", String(row.id).slice(0, 19), row.id);
     } else if (view.kind === "volume") {
-        add("Name", row.name);
-        add("Used by", (row.containers || []).join(", "));
-        add("Mounted at", (row.destinations || []).join(", "));
-        add("Host path", row.mountpoint);
-    } else {
-        add("File", row.name);
-        add("Path", row.path);
-        add("Status", row.state === "configured" ? "File found" : "File not found");
-        add("Privacy", "Contents are never read", "");
+        add("fact.name", "Name", row.name);
+        add("fact.usedBy", "Used by", (row.containers || []).join(", "));
+        add("fact.mountedAt", "Mounted at", (row.destinations || []).join(", "));
+        add("fact.hostPath", "Host path", row.mountpoint);
+    } else if (view.kind === "sqlite") {
+        add("fact.file", "File", row.name);
+        add("fact.path", "Path", row.path);
+        add("fact.status", "Status", row.state === "configured" ? translate(strings, "fact.fileFound", "File found") : translate(strings, "fact.fileMissing", "File not found"));
+        add("fact.privacy", "Privacy", translate(strings, "fact.filePrivacy", "Contents are never read"), "");
     }
     return output;
 }
 
-function filters(tab) {
-    if (tab === "Projects") return [{value:"all",label:"All"},{value:"active",label:"Active"},{value:"dirty",label:"Dirty"},{value:"conflicts",label:"Conflicts"}];
-    if (tab === "Tools") return [{value:"all",label:"All"},{value:"available",label:"Available"}];
-    if (tab === "Localhost") return [{ value: "all", label: "All" }, { value: "localhost", label: "Local" },
-        { value: "lan", label: "Exposed" }];
-    if (tab === "Images") return [{ value: "all", label: "All" }, { value: "images", label: "Images" },
-        { value: "volumes", label: "Volumes" }, { value: "unused", label: "Unused" }];
-    return [{ value: "all", label: "All" }, { value: "running", label: "Running" },
-        { value: "stopped", label: "Stopped" }];
+function filters(tab, strings) {
+    if (tab === "Projects") return [{value:"all",label:translate(strings, "filter.all", "All")},{value:"active",label:translate(strings, "filter.active", "Active")},{value:"dirty",label:translate(strings, "filter.dirty", "Dirty")},{value:"conflicts",label:translate(strings, "filter.conflicts", "Conflicts")}];
+    if (tab === "Tools") return [{value:"all",label:translate(strings, "filter.all", "All")},{value:"available",label:translate(strings, "filter.available", "Available")}];
+    if (tab === "Localhost") return [{ value: "all", label: translate(strings, "filter.all", "All") }, { value: "localhost", label: translate(strings, "filter.local", "Local") },
+        { value: "lan", label: translate(strings, "filter.exposed", "Exposed") }];
+    if (tab === "Images") return [{ value: "all", label: translate(strings, "filter.all", "All") }, { value: "images", label: translate(strings, "filter.images", "Images") },
+        { value: "volumes", label: translate(strings, "filter.volumes", "Volumes") }, { value: "unused", label: translate(strings, "filter.unused", "Unused") }];
+    return [{ value: "all", label: translate(strings, "filter.all", "All") }, { value: "running", label: translate(strings, "filter.running", "Running") },
+        { value: "stopped", label: translate(strings, "filter.stopped", "Stopped") }];
 }
 
-function rows(state, tab, query, filter, cfg, index) {
+function composeMembers(state, name, cfg, strings) {
+    if (!cfg.dockerEnabled) return [];
+    var index = serviceIndex(state, cfg);
+    return (state.containers || []).filter(function (row) { return row.compose === name; })
+        .map(function (row) { return viewRow(row, "container", state, cfg, index, strings); })
+        .sort(function (a, b) { return a.title.localeCompare(b.title) || a.id.localeCompare(b.id); });
+}
+
+function composeRows(groups, strings) {
+    var severity = { ok:0, dim:1, warn:2, urgent:3 };
+    return Object.keys(groups).map(function (name) {
+        var members = groups[name];
+        var running = members.filter(function (row) { return row.rowState === "running"; }).length;
+        var worst = members.reduce(function (previous, row) {
+            return severity[row.tone] > severity[previous.tone] ? row : previous;
+        });
+        var view = viewRow({id:"compose:" + name, name:name, running:running, total:members.length,
+            tone:worst.tone, badge:worst.badge, state:running ? "running" : "stopped",
+            memberIds: members.map(function (row) { return row.id; })}, "compose", null, null, null, strings);
+        view.haystack += " " + members.map(function (row) { return row.haystack; }).join(" ");
+        return view;
+    });
+}
+
+function rows(state, tab, query, filter, cfg, index, strings) {
     var output = [];
     index = index || (["Localhost", "Docker", "Databases", "Projects"].indexOf(tab) >= 0 ? serviceIndex(state, cfg) : null);
     if (tab === "Localhost" || tab === "Databases") {
         index.listeners.forEach(function (row) {
-            if (!hidden(row, cfg) && (tab !== "Databases" || row.database)) output.push(viewRow(row, "port", state, cfg, index));
+            if (!hidden(row, cfg) && (tab !== "Databases" || row.database)) output.push(viewRow(row, "port", state, cfg, index, strings));
         });
     }
+    var compose = Object.create(null);
     if (cfg.dockerEnabled && (tab === "Docker" || tab === "Databases")) {
         (state.containers || []).forEach(function (row) {
             if (tab === "Databases" && (!row.database || output.some(function (r) { return r.containerId === row.id; }))) return;
-            output.push(viewRow(row, "container", state, cfg, index));
+            var view = viewRow(row, "container", state, cfg, index, strings);
+            if (tab === "Docker" && typeof row.compose === "string" && row.compose) {
+                if (!compose[row.compose]) compose[row.compose] = [];
+                compose[row.compose].push(view);
+            } else output.push(view);
         });
+        output = output.concat(composeRows(compose, strings));
     }
-    if (tab === "Databases") (state.sqlite || []).forEach(function (row) { output.push(viewRow(row, "sqlite")); });
+    if (tab === "Databases") (state.sqlite || []).forEach(function (row) { output.push(viewRow(row, "sqlite", null, null, null, strings)); });
     if (tab === "Images" && cfg.dockerEnabled) {
-        (state.images || []).forEach(function (row) { output.push(viewRow(row, "image")); });
-        (state.volumes || []).forEach(function (row) { output.push(viewRow(row, "volume")); });
+        (state.images || []).forEach(function (row) { output.push(viewRow(row, "image", null, null, null, strings)); });
+        (state.volumes || []).forEach(function (row) { output.push(viewRow(row, "volume", null, null, null, strings)); });
     }
-    if (tab === "Projects") (state.projects || []).forEach(function (row) { output.push(viewRow(row, "project", state, cfg, index)); });
-    if (tab === "Tools") (state.tools || []).forEach(function (row) { output.push(viewRow(row, "tool", state, cfg)); });
+    if (tab === "Projects") (state.projects || []).forEach(function (row) { output.push(viewRow(row, "project", state, cfg, index, strings)); });
+    if (tab === "Tools") (state.tools || []).forEach(function (row) { output.push(viewRow(row, "tool", state, cfg, null, strings)); });
     var search = String(query || "").toLowerCase().trim();
+    function matchesRunState(row) {
+        return (row.rowState === "running") === (filter === "running");
+    }
+    function matchesSearch(row) {
+        return !search || row.haystack.indexOf(search) >= 0;
+    }
     output = output.filter(function (row) {
-        var matches = !search || row.haystack.indexOf(search) >= 0;
-        if (filter === "running") matches = matches && row.rowState === "running";
-        if (filter === "stopped") matches = matches && row.rowState !== "running";
+        var matches = matchesSearch(row);
+        if (filter === "running" || filter === "stopped") {
+            if (row.kind === "compose") return compose[row.title].some(function (member) {
+                return matchesRunState(member) && matchesSearch(member);
+            });
+            matches = matches && matchesRunState(row);
+        }
         if (filter === "localhost") matches = matches && row.exposure === "localhost";
         if (filter === "lan") matches = matches && row.exposure !== "localhost";
         if (filter === "images") matches = matches && row.kind === "image";
         if (filter === "volumes") matches = matches && row.kind === "volume";
-        if (filter === "unused") matches = matches && (row.badge === "unused" || row.badge === "unattached");
+        if (filter === "unused") matches = matches && (row.kind === "image" && !rawRow(row).used
+            || row.kind === "volume" && !(rawRow(row).containers || []).length);
         if (filter === "active") matches = matches && row.serviceCount > 0;
         if (filter === "dirty") matches = matches && JSON.parse(row.raw).gitState === "dirty";
         if (filter === "conflicts") matches = matches && !!row.portConflicts;
-        if (filter === "available") matches = matches && row.badge === "available";
+        if (filter === "available") matches = matches && !!rawRow(row).available;
         return matches;
     });
-    var order = ["port", "container", "image", "volume", "sqlite"];
+    var order = ["port", "compose", "container", "image", "volume", "sqlite"];
     output.sort(function (a, b) {
         if (a.kind !== b.kind) return order.indexOf(a.kind) - order.indexOf(b.kind);
         if (cfg.sortBy === "port" && a.port !== b.port) return a.port - b.port;
@@ -517,29 +614,52 @@ function counts(state, cfg) {
     tabNames.forEach(function (tab) {
         if (tab === "Projects") output[tab] = (state.projects || []).length;
         else if (tab === "Tools") output[tab] = (state.tools || []).length;
+        else if (tab === "Docker") output[tab] = cfg.dockerEnabled ? (state.containers || []).length : 0;
         else output[tab] = rows(state, tab, "", "all", cfg, index).length;
     });
     return output;
 }
 
-function summary(state, cfg) {
-    var listening = rows(state, "Localhost", "", "all", cfg).length + " listening";
+function summary(state, cfg, strings) {
+    var count = rows(state, "Localhost", "", "all", cfg).length;
+    var listening = translateCount(strings, "summary.listening", count, "%1 listening", "%1 listening", [count]);
     var containers = cfg.dockerEnabled ? state.containers || [] : [];
     if (!containers.length) return listening;
     var running = containers.filter(function (row) { return row.state === "running"; }).length;
-    return listening + " · " + running + " of " + containers.length + " containers running";
+    return listening + " · " + translateCount(strings, "summary.containers", containers.length,
+        "%1 of %2 container running", "%1 of %2 containers running", [running, containers.length]);
 }
 
-// Only a failed port query makes the bar widget urgent. A missing or stopped Docker daemon is a
+function filterLog(text, query) {
+    if (!text) return {text:"", matched:0, total:0};
+    var lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+    var needle = String(query || "").toLowerCase();
+    if (!needle) return {text:text, matched:lines.length, total:lines.length};
+    var matches = lines.filter(function (line) { return line.toLowerCase().indexOf(needle) >= 0; });
+    return {text:matches.join("\n"), matched:matches.length, total:lines.length};
+}
+
+function attention(state, cfg) {
+    var index = serviceIndex(state, cfg);
+    var exposed = index.listeners.filter(function (row) {
+        return row.exposure === "all" && !hidden(row, cfg);
+    }).length;
+    var unhealthy = cfg.dockerEnabled ? (state.containers || []).filter(function (row) {
+        return row.health === "unhealthy" || row.state === "dead";
+    }).length : 0;
+    return {unhealthy:unhealthy, exposed:exposed};
+}
+
+// A failed port query always makes the bar widget urgent. A missing or stopped Docker daemon is a
 // normal state on many machines and is explained inside the Docker tabs instead.
 function barError(errors) {
     return String((errors || {}).ports || "");
 }
 
-function dockerNotice(state, errors, cfg) {
-    if (!cfg.dockerEnabled) return "Docker integration is turned off in settings.";
+function dockerNotice(state, errors, cfg, strings) {
+    if (!cfg.dockerEnabled) return translate(strings, "docker.disabled", "Docker integration is turned off in settings.");
     var reason = (errors || {}).docker || (errors || {}).assets || "";
-    if ((state || {}).dockerStatus === "unavailable") return "Docker is not reachable: " + (reason || "unknown reason");
+    if ((state || {}).dockerStatus === "unavailable") return translate(strings, "docker.unreachable", "Docker is not reachable: %1", [reason || translate(strings, "docker.unknown", "unknown reason")]);
     return reason;
 }
 
@@ -559,27 +679,35 @@ function palette(toml) {
     return output;
 }
 
-function tabLabel(tab) {
-    return {Localhost:"Ports",Databases:"DBs",Tools:"AI"}[tab] || tab;
+function tabLabel(tab, strings) {
+    switch (tab) {
+    case "Localhost": return translate(strings, "tab.ports", "Ports");
+    case "Docker": return translate(strings, "tab.docker", "Docker");
+    case "Images": return translate(strings, "tab.images", "Images");
+    case "Databases": return translate(strings, "tab.databases", "DBs");
+    case "Projects": return translate(strings, "tab.projects", "Projects");
+    case "Tools": return translate(strings, "tab.tools", "AI");
+    default: return tab;
+    }
 }
 
-function emptyText(tab, query, filter, notice, sampled, cfg) {
+function emptyText(tab, query, filter, notice, sampled, cfg, strings) {
     if (notice && (tab === "Projects" || tab === "Tools")) return notice;
     if (tab === "Projects") {
-        if (!cfg || !lines(cfg.projectRoots).length) return "No project folders yet. Add one in settings (s).";
-        if (!sampled) return "Scanning projects…";
+        if (!cfg || !lines(cfg.projectRoots).length) return translate(strings, "empty.noRoots", "No project folders yet. Add one in settings (s).");
+        if (!sampled) return translate(strings, "empty.scanningProjects", "Scanning projects…");
     }
-    if (tab === "Tools" && !sampled) return "Detecting AI tools…";
-    if (!sampled) return "Collecting local services…";
+    if (tab === "Tools" && !sampled) return translate(strings, "empty.detectingTools", "Detecting AI tools…");
+    if (!sampled) return translate(strings, "empty.collecting", "Collecting local services…");
     if (notice && ["Docker", "Images", "Databases"].indexOf(tab) >= 0 && (tab !== "Databases" || !String(query || "").trim())) return notice;
-    if (String(query || "").trim()) return "Nothing matches “" + String(query).trim() + "”.";
-    if (filter !== "all") return "Nothing matches this filter.";
-    if (tab === "Localhost") return "Nothing is listening on a TCP port.";
-    if (tab === "Docker") return "No containers.";
-    if (tab === "Images") return "No images or volumes.";
-    if (tab === "Projects") return "No Git projects found in these folders.";
-    if (tab === "Tools") return "No AI tools found. Add custom tools in settings.";
-    return "No databases found.\nSQLite files can be added in settings.";
+    if (String(query || "").trim()) return translate(strings, "empty.search", "Nothing matches “%1”.", [String(query).trim()]);
+    if (filter !== "all") return translate(strings, "empty.filter", "Nothing matches this filter.");
+    if (tab === "Localhost") return translate(strings, "empty.ports", "Nothing is listening on a TCP port.");
+    if (tab === "Docker") return translate(strings, "empty.containers", "No containers.");
+    if (tab === "Images") return translate(strings, "empty.images", "No images or volumes.");
+    if (tab === "Projects") return translate(strings, "empty.projects", "No Git projects found in these folders.");
+    if (tab === "Tools") return translate(strings, "empty.tools", "No AI tools found. Add custom tools in settings.");
+    return translate(strings, "empty.databases", "No databases found.\nSQLite files can be added in settings.");
 }
 
 // Turns one finished collector run into a decoded result and a user-facing diagnostic.
@@ -704,6 +832,8 @@ function portConflicts(state, project, cfg, index) {
     index = index || serviceIndex(state, cfg);
     var output = [];
     (project.expectedPorts || []).forEach(function (entry) {
+        if (!cfg.dockerEnabled && (entry.source === "docker-compose.yml" || entry.source === "compose.yaml"))
+            return;
         var holders = Object.create(null);
         function add(holder) {
             if (holders[holder]) return;
@@ -737,10 +867,10 @@ function indexedServices(index, path, cfg) {
     return (index.services[path] || []).filter(function (service) { return service.kind !== "port" || !hidden(service.row, cfg); });
 }
 
-function projectServices(state, path, cfg, index) {
+function projectServices(state, path, cfg, index, strings) {
     cfg = cfg || config({});
     index = index || serviceIndex(state, cfg);
-    return indexedServices(index, path, cfg).map(function (service) { return viewRow(service.row, service.kind, state, cfg, index); });
+    return indexedServices(index, path, cfg).map(function (service) { return viewRow(service.row, service.kind, state, cfg, index, strings); });
 }
 
 
@@ -751,34 +881,50 @@ function rawRow(view) {
     return view || {};
 }
 
+function validComposeProject(name) {
+    return typeof name === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(name);
+}
+
+function validComposeSelection(row) {
+    return validComposeProject(row.name) && Array.isArray(row.memberIds)
+        && row.memberIds.length >= 1 && row.memberIds.length <= 64
+        && row.memberIds.every(function (id) { return typeof id === "string" && /^[a-f0-9]{64}$/.test(id); });
+}
+
 function canManage(view, cfg) {
     if (!cfg.managementEnabled || !view) return false;
     var row = rawRow(view);
+    if (view.kind === "compose") return cfg.dockerEnabled && validComposeSelection(row);
     if (view.kind === "container") return cfg.dockerEnabled && /^[a-f0-9]{64}$/.test(row.id);
     return view.kind === "port" && row.ownedByUser === true && !row.containerName && !(row.containerIds || []).length
         && Number.isInteger(row.pid) && row.pid >= 2 && row.pid <= 4194304 && typeof row.startTicks === "string" && /^\d{1,20}$/.test(row.startTicks || "");
 }
 
-function availableActions(view, cfg, state) {
+function availableActions(view, cfg, state, strings) {
     if (!view) return [];
     var row = rawRow(view), output = [];
     function add(id, label, key, confirm, destructive, extra) {
         output.push(Object.assign({id:id, label:label, key:key || "", confirm:!!confirm, destructive:!!destructive}, extra || {}));
     }
+    if (view.kind === "compose" && canManage(view, cfg)) {
+        add("compose-start", translate(strings, "action.composeStart", "Start all"), "u");
+        add("compose-stop", translate(strings, "action.composeStop", "Stop all"), "x", true, true);
+        add("compose-restart", translate(strings, "action.composeRestart", "Restart all"), "R", true, true);
+    }
     if (view.kind === "container" && cfg.dockerEnabled) {
         if (canManage(view, cfg)) {
-            if (row.state !== "running" && row.state !== "restarting" && row.state !== "paused") add("start", "Start", "u");
-            else { add("stop", "Stop", "x", true, true); add("restart", "Restart", "R", true, true); }
+            if (row.state !== "running" && row.state !== "restarting" && row.state !== "paused") add("start", translate(strings, "action.start", "Start"), "u");
+            else { add("stop", translate(strings, "action.stop", "Stop"), "x", true, true); add("restart", translate(strings, "action.restart", "Restart"), "R", true, true); }
         }
         (row.publishedPorts || []).forEach(function (p) {
             var target = url(Object.assign({}, p, {database:null}), "http");
-            if (target) add("open", "Open :" + p.port, "", false, false, {url:target, raw:JSON.stringify(Object.assign({}, p, {database:null}))});
+            if (target) add("open", translate(strings, "action.open", "Open :%1", [p.port]), "", false, false, {url:target, raw:JSON.stringify(Object.assign({}, p, {database:null}))});
         });
     }
-    if (view.kind === "port" && canManage(view, cfg)) add("terminate", "Stop process", "x", true, true);
+    if (view.kind === "port" && canManage(view, cfg)) add("terminate", translate(strings, "action.terminate", "Stop process"), "x", true, true);
     if (view.kind === "project") {
-        add("terminal", "Terminal", "t"); add("editor", "Editor", "e"); add("files", "Files", "f");
-        add("copy", "Copy path", "c"); add("ai", "AI tools", "a");
+        add("terminal", translate(strings, "action.terminal", "Terminal"), "t"); add("editor", translate(strings, "action.editor", "Editor"), "e"); add("files", translate(strings, "action.files", "Files"), "f");
+        add("copy", translate(strings, "action.copy", "Copy path"), "c"); add("ai", translate(strings, "action.ai", "AI tools"), "a");
     }
     return output;
 }
@@ -787,6 +933,10 @@ function actionArgs(op, view, cfg, context) {
     var row = rawRow(view); context = context || {};
     op = {"docker-start":"start", "docker-stop":"stop", "docker-restart":"restart", "process-terminate":"terminate",
         "open-terminal":"terminal", "open-editor":"editor", "open-files":"files"}[op] || op;
+    var composeOp = op.replace(/^docker-/, "");
+    if (["compose-start", "compose-stop", "compose-restart"].indexOf(composeOp) >= 0)
+        return view.kind === "compose" && validComposeSelection(row) ? ["docker-" + composeOp, "--project=" + row.name]
+            .concat(row.memberIds.map(function (id) { return "--container-id=" + id; })) : null;
     if (["start", "stop", "restart"].indexOf(op) >= 0) return /^[a-f0-9]{64}$/.test(row.id) ? ["docker-" + op, "--container-id=" + row.id] : null;
     if (op === "terminate") {
         if (!Number.isInteger(row.pid) || row.pid < 2 || row.pid > 4194304 || typeof row.startTicks !== "string" || !/^\d{1,20}$/.test(row.startTicks || "")
@@ -813,9 +963,22 @@ function actionArgs(op, view, cfg, context) {
     return args;
 }
 
-function confirmText(op, view) {
+function confirmText(op, view, strings) {
     var row = rawRow(view);
-    if (op === "terminate") return "Send SIGTERM to " + (row.process || "process") + " (PID " + row.pid + ") on port " + row.port + "? It will not be force-killed.";
-    return (op === "restart" ? "Restart" : "Stop") + " container “" + row.name + "”?";
+    if (op === "compose-stop" || op === "compose-restart") {
+        var count = row.memberIds.length;
+        return op === "compose-restart"
+            ? translateCount(strings, "confirm.composeRestart", count,
+                "Restart %1 container in “%2”?", "Restart %1 containers in “%2”?", [count, row.name])
+            : translateCount(strings, "confirm.composeStop", count,
+                "Stop %1 container in “%2”?", "Stop %1 containers in “%2”?", [count, row.name]);
+    }
+    if (op === "terminate")
+        return known(row.process)
+            ? translate(strings, "confirm.terminate", "Send SIGTERM to %1 (PID %2) on port %3? It will not be force-killed.", [row.process, row.pid, row.port])
+            : translate(strings, "confirm.terminateUnknown", "Send SIGTERM to PID %1 on port %2? It will not be force-killed.", [row.pid, row.port]);
+    return op === "restart"
+        ? translate(strings, "confirm.restart", "Restart container “%1”?", [row.name])
+        : translate(strings, "confirm.stop", "Stop container “%1”?", [row.name]);
 }
 

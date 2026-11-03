@@ -32,12 +32,15 @@ SCAN_STOPPED = "Project scan stopped early (limit reached); showing partial resu
 PRUNED = {"node_modules", "vendor", "target", "build", "dist", "venv", "__pycache__"}
 
 ENV_PORT = re.compile(
-    r"""^[^\S\n]*(?:export[^\S\n]+)?(?:PORT|[A-Za-z_][A-Za-z0-9_]*_PORT)[^\S\n]*=[^\S\n]*(?:["']([0-9]{1,5})["']|([0-9]{1,5}))[^\S\n]*(?:#[^\n]*)?$""",
+    r"""^[^\S\n]*(?:export[^\S\n]+)?(?:PORT|(?:[A-Za-z_][A-Za-z0-9_]*)?_PORT)[^\S\n]*=[^\S\n]*"""
+    r"""(["']?)0*(?P<port>[0-9]{1,5})\1[^\S\n]*(?:#[^\n]*)?$""",
     re.MULTILINE,
 )
-SCRIPT_PORT = re.compile(r"(?:^|[\s;&|])(?:--port[= \t]+|-p[ \t]+|PORT=)([0-9]{1,5})(?=$|[\s;&|])")
+SCRIPT_PORT = re.compile(
+    r"(?:^|[\s;&|])(?:--port[= \t]+|-p[ \t]+|PORT=)0*(?P<port>[0-9]{1,5})(?=$|[\s;&|])"
+)
 COMPOSE_PORT = re.compile(
-    r"""["'](?:[\w.]+:|\[[\da-fA-F:]+\]:)?([0-9]{1,5}):[0-9]{1,5}(?:/(?:tcp|udp))?["']"""
+    r"""(["'])(?:[\w.]+:|\[[\da-fA-F:]+\]:)?0*(?P<port>[0-9]{1,5}):[0-9]{1,5}(?:/(?:tcp|udp))?\1"""
 )
 
 
@@ -65,6 +68,76 @@ def validate_root(path: str) -> Path:
     except (ValueError, OSError, RuntimeError, UnicodeError) as exc:
         raise CollectionError("invalid project folder") from exc
     return resolved
+
+
+def project_directory(path: str, roots: list[str]) -> Path:
+    if ".." in Path(path).parts or len(roots) > 16:
+        raise CollectionError("path is not inside a project folder")
+    directory = validate_root(path)
+    resolved_roots = [validate_root(root) for root in roots]
+    if not any(directory == root or root in directory.parents for root in resolved_roots):
+        raise CollectionError("path is not inside a project folder")
+    try:
+        if directory.stat().st_uid != os.getuid():
+            raise CollectionError("The project folder is not owned by you")
+    except OSError as exc:
+        raise CollectionError("The project folder is not owned by you") from exc
+    return directory
+
+
+def has_git_marker(project: Path) -> bool:
+    try:
+        mode = (project / ".git").lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) or stat.S_ISREG(mode)
+
+
+def run_project_git(project: Path, runner: CommandRunner, args: list[str]) -> str:
+    return runner.run(
+        [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(project),
+            *args,
+        ],
+        timeout=2,
+        env={
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "",
+            "GIT_CEILING_DIRECTORIES": str(project.parent),
+        },
+    )
+
+
+def check_project_git_config(project: Path, runner: CommandRunner) -> None:
+    try:
+        configured = run_project_git(
+            project,
+            runner,
+            [
+                "config",
+                "--show-scope",
+                "--no-includes",
+                "--name-only",
+                "--get-regexp",
+                r"^(filter|include|includeif)\.",
+            ],
+        )
+    except CommandFailed as exc:
+        # git config exits 1 without stderr when no key matches.
+        if exc.returncode != 1 or exc.stderr:
+            raise
+        return
+    if any(line.partition("\t")[0] in ("local", "worktree") for line in configured.splitlines()):
+        raise CollectionError("Project uses local Git filters or includes.")
 
 
 def read_regular_file(path: Path, limit: int = 4096) -> str | None:
@@ -109,7 +182,7 @@ def expected_ports(project: Path) -> list[dict[str, int | str]]:
             inputs = [value for value in scripts.values() if isinstance(value, str)]
         for value in inputs:
             for match in pattern.finditer(value):
-                number = int(match[1] or match[2]) if pattern is ENV_PORT else int(match[1])
+                number = int(match["port"])
                 entry = (number, name)
                 if not 1 <= number <= 65535 or entry in seen:
                     continue
@@ -196,11 +269,7 @@ def discover(
                 return
             visited += 1
             seen.add(real)
-            try:
-                marker = (path / ".git").lstat()
-            except FileNotFoundError:
-                marker = None
-            if marker and (stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)):
+            if has_git_marker(path):
                 projects.append(
                     dict(
                         id="project:" + str(real),
@@ -242,40 +311,16 @@ def discover(
 
 def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
     result = unknown_status(project)
-    env = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+    if not has_git_marker(project):
+        return result
     try:
-        try:
-            configured = runner.run(
-                [
-                    "git",
-                    "-C",
-                    str(project),
-                    "config",
-                    "--local",
-                    "--name-only",
-                    "--get-regexp",
-                    r"^(filter|include|includeif)\.",
-                ],
-                timeout=2,
-                env=env,
-            )
-        except CommandFailed as exc:
-            # git config exits 1, without stderr, when no key matches the expression.
-            if exc.returncode != 1 or exc.stderr:
-                raise
-            configured = ""
-        if configured.strip():
-            return result
-        raw = runner.run(
+        check_project_git_config(project, runner)
+        raw = run_project_git(
+            project,
+            runner,
             [
-                "git",
-                "--no-optional-locks",
-                "-c",
-                "core.fsmonitor=false",
                 "-c",
                 "core.untrackedCache=false",
-                "-C",
-                str(project),
                 "status",
                 "--porcelain=v2",
                 "--branch",
@@ -283,8 +328,6 @@ def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
                 "--untracked-files=normal",
                 "--ignore-submodules=all",
             ],
-            timeout=2,
-            env=env,
         )
         records = iter(raw.split("\0"))
         for record in records:

@@ -683,7 +683,16 @@ def collect(
 def main() -> int:
     parser = CLIParser(description=__doc__)
     parser.add_argument(
-        "scope", choices=["ports", "docker", "assets", "logs", "projects", "tools", "legacy"]
+        "scope",
+        choices=[
+            "ports",
+            "docker",
+            "assets",
+            "logs",
+            "projects",
+            "tools",
+            "legacy",
+        ],
     )
     parser.add_argument("--no-docker", action="store_true")
     parser.add_argument("--sqlite-file", action="append", default=[])

@@ -17,12 +17,15 @@ Ui.Panel {
     readonly property var hostBar: bar
     property Item anchorItem: null
     property var hostWidget: null
+    readonly property alias translations: strings
 
     property string tab: ""
     property string query: ""
     property string filter: "all"
     // "list", "detail", "logs" or "settings".
     property string view: "list"
+    property bool logFollow: false
+    property string logQuery: ""
     property int cursor: 0
     property string toolProject: ""
     property var confirmation: null
@@ -36,6 +39,7 @@ Ui.Panel {
     })
     readonly property var entries: listModel
     property string selectedId: ""
+    property string composeParentId: ""
     property var selectedRow: ({})
     property double now: Date.now() / 1000
 
@@ -56,11 +60,11 @@ Ui.Panel {
     readonly property var errors: hostWidget ? hostWidget.errors : ({})
     readonly property var counts: hostWidget ? hostWidget.counts : ({})
     readonly property bool sampled: hostWidget ? hostWidget.lastUpdate > 0 || hostWidget.hasError : false
-    readonly property var visibleRows: Model.rows(inventory, tab, query, filter, cfg)
-    readonly property string dockerNotice: Model.dockerNotice(inventory, errors, cfg)
+    readonly property var visibleRows: Model.rows(inventory, tab, query, filter, cfg, null, strings)
+    readonly property string dockerNotice: Model.dockerNotice(inventory, errors, cfg, strings)
     readonly property string scopeNotice: tab === "Projects" ? errors.projects || "" : tab === "Tools" ? errors.tools || "" : ["Docker", "Images", "Databases"].indexOf(tab) >= 0 ? dockerNotice : ""
-    readonly property var selectedFacts: selectedId ? Model.facts(selectedRow, now) : []
-    readonly property string updatedText: hostWidget && hostWidget.lastUpdate > 0 ? "Updated " + new Date(hostWidget.lastUpdate).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat) + " · " : ""
+    readonly property var selectedFacts: selectedId ? Model.facts(selectedRow, now, strings) : []
+    readonly property string updatedText: hostWidget && hostWidget.lastUpdate > 0 ? strings.t("panel.updated").arg(new Date(hostWidget.lastUpdate).toLocaleTimeString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat)) + " · " : ""
     readonly property bool canOpenAs: selectedRow.kind === "port" && !selectedRow.url && selectedRawRow.database === null
     readonly property var selectedRawRow: {
         try {
@@ -68,6 +72,11 @@ Ui.Panel {
         } catch (error) {
             return {};
         }
+    }
+
+    Commons.Translations {
+        id: strings
+        directory: Qt.resolvedUrl("i18n")
     }
 
     // Themes may set accent to any hue, so tone never relies on it: plain, dimmed or urgent.
@@ -96,22 +105,56 @@ Ui.Panel {
             launchTool(visibleRows[index]);
             return;
         }
+        composeParentId = "";
         selectedRow = visibleRows[index];
         selectedId = selectedRow.id;
         now = Date.now() / 1000;
         view = "detail";
     }
 
+    function openRelated(row) {
+        if (selectedRow.kind === "compose") {
+            composeParentId = selectedId;
+            selectedId = row.id;
+            selectedRow = row;
+            focusKeys();
+            return;
+        }
+        selectTab(row.kind === "container" ? "Docker" : "Localhost");
+        const compose = row.kind === "container" ? Model.rawRow(row).compose : "";
+        const id = compose ? "compose:" + compose : row.id;
+        const index = visibleRows.findIndex(function (entry) {
+            return entry.id === id;
+        });
+        openDetail(index);
+        if (index >= 0 && compose)
+            openRelated(row);
+    }
+
+    function detailRow(id) {
+        const listRow = visibleRows.find(function (row) {
+            return row.id === id;
+        });
+        if (listRow || !composeParentId)
+            return listRow;
+        const parent = visibleRows.find(function (row) {
+            return row.id === root.composeParentId;
+        });
+        return parent ? Model.composeMembers(inventory, parent.title, cfg, strings).find(function (row) {
+            return row.id === id;
+        }) : null;
+    }
+
     function launchTool(row) {
         if (!toolProject || !projectOptions.some(function (p) {
             return p.value === root.toolProject;
         })) {
-            hostWidget.notify("Choose a project before launching an AI tool.", true);
+            hostWidget.notify(strings.t("panel.chooseToolProject"), true);
             return;
         }
         var raw = Model.rawRow(row);
         if (!raw.available) {
-            hostWidget.notify(raw.reason || "This tool is not available.", true);
+            hostWidget.notify(raw.reason || strings.t("panel.toolUnavailable"), true);
             return;
         }
         hostWidget.runOperation("launch-tool", row, {
@@ -137,16 +180,15 @@ Ui.Panel {
             return;
         }
         // Check availability again: shortcuts and stale buttons cannot bypass management settings.
-        var available = Model.availableActions(row, cfg, inventory).some(function (a) {
+        var available = Model.availableActions(row, cfg, inventory).find(function (a) {
             return a.id === action.id;
         });
         if (!available)
             return;
-        if (action.confirm)
+        if (available.confirm)
             confirmation = {
                 op: action.id,
-                row: row,
-                message: Model.confirmText(action.id, row)
+                row: row
             };
         else
             hostWidget.runOperation(action.id, row, {});
@@ -179,11 +221,19 @@ Ui.Panel {
 
     // One step towards the list: logs -> detail -> list, settings -> list.
     function back() {
-        if (hostWidget)
-            hostWidget.clearLogs();
         if (view === "logs") {
             view = "detail";
             return;
+        }
+        if (composeParentId) {
+            const parent = detailRow(composeParentId);
+            composeParentId = "";
+            if (parent) {
+                selectedId = parent.id;
+                selectedRow = parent;
+                focusKeys();
+                return;
+            }
         }
         selectedId = "";
         selectedRow = {};
@@ -194,6 +244,7 @@ Ui.Panel {
         var leaving = view === "settings";
         if (view === "logs")
             back();
+        composeParentId = "";
         back();
         if (!leaving)
             view = "settings";
@@ -202,6 +253,7 @@ Ui.Panel {
     function selectTab(name) {
         if (cfg.tabs.indexOf(name) < 0)
             return;
+        composeParentId = "";
         back();
         view = "list";
         tab = name;
@@ -238,9 +290,7 @@ Ui.Panel {
             selectTab(cfg.tabs[0]);
     }
     onVisibleRowsChanged: {
-        if (confirmation && !visibleRows.some(function (row) {
-            return row.id === root.confirmation.row.id;
-        })) {
+        if (confirmation && !detailRow(confirmation.row.id)) {
             confirmation = null;
             focusKeys();
         }
@@ -248,16 +298,22 @@ Ui.Panel {
         cursor = Math.max(0, Math.min(visibleRows.length - 1, cursor));
         if (!selectedId)
             return;
-        let match = visibleRows.filter(function (row) {
-            return row.id === root.selectedId;
-        });
-        if (match.length) {
-            selectedRow = match[0];
+        const match = detailRow(selectedId);
+        if (match) {
+            selectedRow = match;
         } else {
             // The service went away while its details were open.
             if (view === "logs")
                 back();
             back();
+        }
+    }
+    onViewChanged: {
+        if (view !== "logs") {
+            logFollow = false;
+            logQuery = "";
+            if (hostWidget && hostWidget.logs.containerId)
+                hostWidget.clearLogs();
         }
     }
     onOpenedChanged: {
@@ -298,6 +354,14 @@ Ui.Panel {
         onTriggered: root.now = Date.now() / 1000
     }
 
+    Timer {
+        objectName: "logFollowTimer"
+        interval: 3000
+        repeat: true
+        running: root.opened && root.view === "logs" && root.logFollow && root.cfg.dockerEnabled && !!root.hostWidget && !!root.selectedRow.containerId
+        onTriggered: root.hostWidget.requestLogs(root.selectedRow.containerId, true)
+    }
+
     component Label: Text {
         textFormat: Text.PlainText
         color: root.foreground
@@ -320,7 +384,7 @@ Ui.Panel {
                 id: keys
                 objectName: "keys"
                 implicitHeight: column.implicitHeight
-                blocked: root.confirming || listPage.searchField.activeFocus || settingsForm.editing || projectPicker.popupOpen
+                blocked: root.confirming || listPage.searchField.activeFocus || detailPage.logSearchField.activeFocus || settingsForm.editing || projectPicker.popupOpen
 
                 // A view change hides whatever input had focus; keys belong to the panel again.
                 Connections {
@@ -370,6 +434,10 @@ Ui.Panel {
                         root.copyCurrent();
                     else if (key === "/" && root.view === "list")
                         listPage.searchField.forceActiveFocus();
+                    else if (key === "/" && root.view === "logs")
+                        detailPage.logSearchField.forceActiveFocus();
+                    else if (key === "f" && root.view === "logs")
+                        root.logFollow = !root.logFollow;
                     else if (key === "o" && root.view === "detail" && root.selectedRow.url)
                         root.openCurrent("");
                     else if (key === "s")
@@ -429,14 +497,15 @@ Ui.Panel {
                                 spacing: Style.space(2)
                                 Label {
                                     width: parent.width
-                                    text: Model.displayName + (root.view === "settings" ? " settings" : "")
+                                    objectName: "dashboardTitle"
+                                    text: root.view === "settings" ? strings.t("panel.settingsTitle").arg(Model.displayName) : Model.displayName
                                     font.pixelSize: root.fonts.title
                                     font.bold: true
                                     elide: Text.ElideRight
                                 }
                                 Label {
                                     width: parent.width
-                                    text: Model.tagline
+                                    text: strings.t("panel.tagline")
                                     color: root.dim
                                     font.pixelSize: root.fonts.caption
                                     font.bold: true
@@ -453,7 +522,7 @@ Ui.Panel {
                                     // nf-md-refresh
                                     iconText: "\u{f0450}"
                                     iconSpinning: !!root.hostWidget && root.hostWidget.refreshing
-                                    tooltipText: "Refresh (r)"
+                                    tooltipText: strings.t("panel.refresh")
                                     foreground: root.foreground
                                     horizontalPadding: root.gaps.md
                                     onClicked: root.hostWidget.refresh()
@@ -461,7 +530,7 @@ Ui.Panel {
                                 Ui.Button {
                                     // nf-md-cog
                                     iconText: "\u{f0493}"
-                                    tooltipText: "Settings (s)"
+                                    tooltipText: strings.t("panel.settings")
                                     selected: root.view === "settings"
                                     foreground: root.foreground
                                     horizontalPadding: root.gaps.md
@@ -485,7 +554,7 @@ Ui.Panel {
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.margins: root.gaps.xl
-                                text: (root.hostWidget ? root.hostWidget.errorText : "") + "\nShowing the last successful sample."
+                                text: (root.hostWidget ? root.hostWidget.errorText : "") + "\n" + strings.t("panel.lastSample")
                                 color: root.urgent
                                 font.pixelSize: root.fonts.bodySmall
                                 wrapMode: Text.WordWrap
@@ -510,7 +579,7 @@ Ui.Panel {
                                     Ui.Button {
                                         required property string modelData
                                         width: (tabRow.width - tabRow.spacing * (root.cfg.tabs.length - 1)) / root.cfg.tabs.length
-                                        text: Model.tabLabel(modelData) + (root.sampled && modelData !== "Projects" && modelData !== "Tools" ? " " + (root.counts[modelData] || 0) : "")
+                                        text: Model.tabLabel(modelData, strings) + (root.sampled && modelData !== "Projects" && modelData !== "Tools" ? " " + (root.counts[modelData] || 0) : "")
                                         selected: root.tab === modelData
                                         bordered: true
                                         foreground: root.foreground
@@ -524,7 +593,7 @@ Ui.Panel {
                                 objectName: "projectPicker"
                                 width: parent.width
                                 visible: root.tab === "Tools"
-                                label: "Launch in project"
+                                label: strings.t("panel.launchInProject")
                                 value: root.toolProject
                                 options: root.projectOptions
                                 foreground: root.foreground
@@ -535,7 +604,7 @@ Ui.Panel {
                             Label {
                                 width: parent.width
                                 visible: root.tab === "Tools" && !root.projectOptions.length
-                                text: "No project available. Add project folders in settings (s)."
+                                text: strings.t("panel.noToolProject")
                                 color: root.dim
                                 wrapMode: Text.WordWrap
                             }
@@ -548,6 +617,7 @@ Ui.Panel {
 
                         // ---- detail and logs ----------------------------------------------
                         DetailPage {
+                            id: detailPage
                             width: parent.width
                             panel: root
                         }
@@ -581,11 +651,11 @@ Ui.Panel {
                         Label {
                             width: parent.width
                             readonly property bool hasMessage: !!root.hostWidget && root.hostWidget.message !== ""
-                            text: root.operating ? root.hostWidget.operation.label : hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + (root.tab === "Tools" ? "↵ launch in project" : "↵ details · / search · c copy") + " · s settings" : root.view === "settings" ? "Changes apply when saved · Esc cancels" : root.view === "logs" ? "Esc back to details" : ["Esc back"].concat(Model.availableActions(root.selectedRow, root.cfg, root.inventory).filter(function (a) {
+                            text: root.operating ? root.hostWidget.operation.label : hasMessage ? root.hostWidget.message : root.view === "list" ? root.updatedText + (root.tab === "Tools" ? strings.t("keys.launch") : strings.t("keys.list")) + strings.t("keys.settings") : root.view === "settings" ? strings.t("keys.save") : root.view === "logs" ? strings.t("keys.log") : [strings.t("keys.back")].concat(Model.availableActions(root.selectedRow, root.cfg, root.inventory, strings).filter(function (a) {
                                 return a.key;
                             }).map(function (a) {
                                 return a.key + " " + a.label.toLowerCase();
-                            })).concat(root.selectedRow.containerId && root.cfg.dockerEnabled ? ["→ logs"] : []).join(" · ")
+                            })).concat(root.selectedRow.containerId && root.cfg.dockerEnabled ? [strings.t("keys.openLogs")] : []).join(" · ")
                             color: hasMessage && root.hostWidget.messageUrgent ? root.urgent : root.dim
                             font.pixelSize: root.fonts.caption
                             elide: Text.ElideRight
@@ -598,7 +668,9 @@ Ui.Panel {
                 ConfirmSheet {
                     anchors.fill: parent
                     opened: root.confirming
-                    message: root.confirmation ? root.confirmation.message : ""
+                    message: root.confirmation ? Model.confirmText(root.confirmation.op, root.confirmation.row, strings) : ""
+                    cancelLabel: strings.t("common.cancel")
+                    confirmLabel: strings.t("common.confirm")
                     foreground: root.foreground
                     onCanceled: {
                         root.confirmation = null;

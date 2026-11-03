@@ -238,7 +238,7 @@ test('facts describe each kind without unknown noise and stay copyable', () => {
     const anonymous = M.rows({ports:[{...port(53), process:'Unknown', pid:null, owner:'Unknown', cwd:null, startedAt:null, protocol:null}]}, 'Localhost', '', 'all', M.config({}))[0];
     assert.equal(anonymous.title, 'Unknown process');
     assert.deepEqual(clone(M.facts(anonymous, now).map(f => f.label)), ['Address', 'Exposure', 'Process']);
-    const dock = M.rows({containers:[{...container(), cpu:'0.5%', memory:'10MiB / 1GiB', restart:'always', compose:'shop'}]}, 'Docker', '', 'all', M.config({}))[0];
+    const dock = M.composeMembers({containers:[{...container(), cpu:'0.5%', memory:'10MiB / 1GiB', restart:'always', compose:'shop'}]}, 'shop', M.config({}))[0];
     const dockFacts = clone(M.facts(dock, now));
     assert.equal(dockFacts.find(f => f.label === 'ID').value, cid.slice(0, 12));
     assert.equal(dockFacts.find(f => f.label === 'ID').copy, cid);
@@ -552,4 +552,139 @@ test('project conflicts exclude own listeners and include other projects and una
     assert.equal(rows[0].badge, 'main !');
     assert.ok(M.facts(rows[0], 0).some(fact => fact.label === 'Port conflicts' && fact.value.includes('3004')));
     assert.ok(M.filters('Projects').some(filter => filter.value === 'conflicts'));
+});
+
+test('Docker groups Compose members, matches member filters and gates bulk actions', () => {
+    const cfg = M.config({managementEnabled:true});
+    const state = {containers:[
+        {...container(), compose:'shop', name:'frontend'},
+        {...container(), compose:'shop', id:'b'.repeat(64), state:'exited', health:'unhealthy'},
+        {...container(), id:'c'.repeat(64), name:'standalone'}
+    ]};
+    assert.deepEqual(clone(M.rows(state, 'Docker', 'frontend', 'stopped', cfg)), []);
+    assert.deepEqual(clone(M.rows(state, 'Docker', 'web', 'running', cfg)), []);
+    assert.equal(M.rows(state, 'Docker', 'frontend', 'running', cfg)[0].id, 'compose:shop');
+    const group = M.rows(state, 'Docker', 'web', 'stopped', cfg)[0];
+    assert.equal(group.kind, 'compose');
+    assert.equal(group.id, 'compose:shop');
+    assert.equal(group.title, 'shop');
+    assert.equal(group.subtitle, '1/2 running');
+    assert.equal(group.tone, 'urgent');
+    assert.equal(group.badge, "unhealthy");
+    assert.equal(M.rows(state, 'Docker', '', 'all', cfg).length, 2);
+    assert.ok(M.rows(state, 'Docker', '', 'running', cfg).some(row => row.id === group.id));
+    assert.deepEqual(clone(M.composeMembers(state, 'shop', cfg).map(row => row.title)), ['frontend', 'web']);
+    assert.deepEqual(clone(M.availableActions(group, cfg, state).map(({key, confirm}) => [key, confirm])),
+        [['u', false], ['x', true], ['R', true]]);
+    assert.deepEqual(clone(M.availableActions(group, M.config({}), state)), []);
+    assert.deepEqual(clone(M.actionArgs('compose-restart', group, cfg)), ['docker-compose-restart', '--project=shop', '--container-id=' + cid, '--container-id=' + 'b'.repeat(64)]);
+    assert.match(M.confirmText('compose-restart', group), /shop/);
+});
+
+test('status attention counts unhealthy or dead containers and visible wildcard listeners once', () => {
+    const published = port(8080, '0.0.0.0');
+    const state = {
+        ports:[published, port(9090, '0.0.0.0'), port(3000)],
+        containers:[
+            {...container(), health:'unhealthy', publishedPorts:[published]},
+            {...container(), id:'b'.repeat(64), state:'dead', health:'unhealthy', publishedPorts:[]},
+            {...container(), id:'c'.repeat(64), state:'exited', publishedPorts:[]}
+        ]
+    };
+    assert.equal(M.config({}).statusBadge, false);
+    assert.equal(M.config({statusBadge:'true'}).statusBadge, false);
+    assert.deepEqual(clone(M.attention(state, M.config({hiddenPorts:'9090'}))), {unhealthy:2, exposed:1});
+    assert.deepEqual(clone(M.attention(state, M.config({dockerEnabled:false, exposure:'localhost'}))), {unhealthy:0, exposed:0});
+});
+
+test('log filtering counts case-insensitive matches without a trailing phantom line', () => {
+    const text = 'Server ready\n\nERROR one\r\nerror two\n';
+    assert.deepEqual(clone(M.filterLog(text, 'ErRoR')), {text:'ERROR one\nerror two', matched:2, total:4});
+    assert.deepEqual(clone(M.filterLog(text, '')), {text, matched:4, total:4});
+    assert.deepEqual(clone(M.filterLog('', 'foo')), {text:'', matched:0, total:0});
+    assert.deepEqual(clone(M.filterLog('\n', 'foo')), {text:'', matched:0, total:1});
+});
+
+test('English and Turkish catalogs share keys, plural forms and placeholders', () => {
+    const catalog = locale => JSON.parse(fs.readFileSync(path.join(__dirname, '../i18n', locale + '.json'), 'utf8'));
+    const en = catalog('en');
+    const tr = catalog('tr');
+    assert.deepEqual(Object.keys(en).sort(), Object.keys(tr).sort());
+    const placeholders = value => Array.from(new Set(value.match(/%[1-9]/g) || [])).sort();
+    for (const [key, value] of Object.entries(en)) {
+        if (typeof value === 'string') {
+            assert.equal(typeof tr[key], 'string', key);
+            assert.deepEqual(placeholders(tr[key]), placeholders(value), key);
+        } else {
+            assert.deepEqual(Object.keys(value).sort(), ['one', 'other'], key);
+            assert.deepEqual(Object.keys(tr[key]), ['other'], key);
+            assert.deepEqual(placeholders(tr[key].other), placeholders(value.other), key);
+            assert.deepEqual(placeholders(value.one), placeholders(value.other), key);
+        }
+    }
+    const root = path.dirname(file);
+    const sources = fs.readdirSync(root).filter(name => name.endsWith('.qml')).concat('Model.js');
+    for (const name of sources) {
+        const source = fs.readFileSync(path.join(root, name), 'utf8');
+        const references = source.matchAll(/(?:\.t[n]?\(|translate(?:Count)?\(strings,\s*|(?:add|validationFailure)\()"(\w+\.[A-Za-z]+)"/g);
+        for (const [, key] of references) assert.ok(Object.hasOwn(en, key), name + ': ' + key);
+    }
+    const localizer = dict => ({
+        t(key) {
+            assert.ok(Object.hasOwn(dict, key), 'Missing key ' + key);
+            return dict[key];
+        },
+        tn(key, count) {
+            assert.ok(Object.hasOwn(dict, key), 'Missing plural key ' + key);
+            return count === 1 ? (dict[key].one || dict[key].other) : dict[key].other;
+        }
+    });
+    assert.equal(M.tabLabel('Localhost', localizer(en)), 'Ports');
+    assert.equal(M.tabLabel('Localhost', localizer(tr)), 'Portlar');
+    assert.equal(M.tabLabel('Databases', localizer(tr)), 'DB');
+    assert.equal(M.tabLabel('Tools', localizer(tr)), 'AI');
+    assert.deepEqual(clone(M.filters('Projects', localizer(tr)).map(option => option.label)), ['Tümü', 'Etkin', 'Değişmiş', 'Çakışma']);
+    assert.doesNotMatch(JSON.stringify(tr), /kapsayıcı/i);
+    assert.equal(M.stateText('exited', localizer(tr)), 'Durdu');
+    const unidentified = M.viewRow({...port(), process:'Unknown'}, 'port');
+    assert.equal(M.confirmText('terminate', unidentified, localizer(tr)),
+        'PID 100 sürecine (port 3000) SIGTERM gönderilsin mi? Zorla sonlandırılmaz.');
+    assert.equal(M.confirmText('terminate', M.viewRow(port(), 'port'), localizer(tr)),
+        '3000 portundaki vite sürecine (PID 100) SIGTERM gönderilsin mi? Süreç zorla sonlandırılmayacak.');
+    assert.equal(M.emptyText('Localhost', '<%2>', 'all', '', true, M.config({}), localizer(tr)),
+        '“<%2>” ile eşleşen sonuç yok.');
+    assert.equal(M.confirmText('stop', M.viewRow(container(), 'container'), localizer(tr)),
+        '“web” adlı container durdurulsun mu?');
+    assert.equal(M.summary({ports:[port()]}, M.config({}), localizer(tr)), '1 port dinlemede');
+    const images = {images:[{id:'sha256:a', tags:[], used:false}]};
+    const image = M.rows(images, 'Images', '', 'unused', M.config({}), null, localizer(tr))[0];
+    assert.equal(image.title, 'Etiketsiz');
+    assert.equal(image.copyText, 'sha256:a');
+    const unhealthy = {...container(), health:'unhealthy'};
+    const docker = M.rows({containers:[unhealthy]}, 'Docker', '', 'all', M.config({}), null, localizer(tr))[0];
+    assert.equal(docker.badge, 'Sağlıksız');
+    assert.equal(M.facts(docker, 0, localizer(tr)).find(fact => fact.label === 'Durum').value, 'Çalışıyor (Sağlıksız)');
+});
+
+test('Docker tab count reflects containers even when their rows are grouped', () => {
+    const state = {containers:[{...container(), compose:'shop'}, {...container(), id:'b'.repeat(64), compose:'shop'}]};
+    assert.equal(M.rows(state, 'Docker', '', 'all', M.config({})).length, 1);
+    assert.equal(M.counts(state, M.config({})).Docker, 2);
+    assert.equal(M.counts(state, M.config({dockerEnabled:false})).Docker, 0);
+});
+
+test('project port conflicts preserve urgent Git conflict tone', () => {
+    const project = {id:'project:/work/app', path:'/work/app', name:'app', branch:'main', gitState:'dirty',
+        conflicts:1, expectedPorts:[{port:3000, source:'.env'}]};
+    const row = M.rows({projects:[project], ports:[port()]}, 'Projects', '', 'conflicts', M.config({}))[0];
+    assert.equal(row.tone, 'urgent');
+    assert.match(row.badge, /!$/);
+});
+
+test('Compose ports cannot report phantom conflicts without Docker inventory', () => {
+    const project = {path:'/work/app', expectedPorts:[{port:3000, source:'compose.yaml'}, {port:3001, source:'.env'}]};
+    const state = {projects:[project], ports:[{...port(), cwd:null, process:'docker-proxy'}, {...port(3001), cwd:null}]};
+    assert.deepEqual(clone(M.portConflicts(state, project, M.config({dockerEnabled:false}))), [
+        {port:3001, source:'.env', holder:'vite'}
+    ]);
 });

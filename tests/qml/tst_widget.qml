@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import qs.Commons as Commons
 import "../.." as Plugin
 import "../../Model.js" as Model
 
@@ -38,6 +39,7 @@ TestCase {
     }
 
     function cleanup() {
+        Commons.I18n.language = "en";
         suite.visible = false;
     }
 
@@ -182,6 +184,64 @@ TestCase {
         compare(t.widget.logs.text, "");
     }
 
+    function test_projectDetailsDoNotRequestHistoryOrRenderAPreview() {
+        const t = createWidget();
+        t.widget.settings = {
+            dockerEnabled: false,
+            projectRoots: "/work"
+        };
+        t.widget.inventory = {
+            projects: [projectRow()]
+        };
+        t.widget.open();
+        t.widget.panel.selectTab("Projects");
+        t.widget.panel.openDetail(0);
+        compare(t.widget.panel.selectedRow.kind, "project");
+        compare(typeof t.widget.requestProjectDetail, "undefined");
+        compare(findChild(t.widget.panel, "readmePreview"), null);
+    }
+
+    function test_statusBadgeOptInHighlightsAndExplainsAttention() {
+        const t = createWidget();
+        const button = findChild(t.widget, "statusIcon");
+        verify(button !== null);
+        const exposed = port(3000, "vite");
+        exposed.exposure = "all";
+        t.widget.settings = {
+            dockerEnabled: true
+        };
+        t.widget.inventory = {
+            ports: [exposed],
+            containers: [
+                {
+                    id: cid,
+                    name: "web",
+                    state: "running",
+                    health: "unhealthy",
+                    publishedPorts: []
+                }
+            ]
+        };
+        verify(!button.active);
+        t.widget.settings = {
+            dockerEnabled: true,
+            statusBadge: true
+        };
+        tryCompare(button, "active", true);
+        tryVerify(function () {
+            return t.widget.tooltip.includes("1 unhealthy container · 1 port open to the network");
+        });
+        t.widget.settings = {
+            dockerEnabled: true,
+            statusBadge: false
+        };
+        tryCompare(button, "active", false);
+        t.widget.errors = {
+            ports: "Port query failed."
+        };
+        tryCompare(button, "active", true);
+    }
+
     function test_dockerTroubleDoesNotMakeTheBarUrgent() {
         const t = createWidget();
         t.widget.errors = {
@@ -276,6 +336,132 @@ TestCase {
         p.panel.openDetail(0);
         return p;
     }
+    function test_composeGroupOpensMemberAndConfirmsBulkStop() {
+        const p = dockerPanel(true);
+        p.widget.inventory = {
+            containers: [
+                {
+                    id: cid,
+                    name: "web",
+                    compose: "shop",
+                    state: "running",
+                    publishedPorts: []
+                }
+            ]
+        };
+        keyClick(Qt.Key_Return);
+        compare(p.panel.selectedRow.kind, "compose");
+        const member = findChild(p.panel, "composeMember");
+        verify(member !== null);
+        member.click();
+        compare(p.panel.selectedRow.id, cid);
+        keyClick(Qt.Key_Escape);
+        compare(p.panel.selectedRow.id, "compose:shop");
+        keyClick(Qt.Key_X);
+        verify(p.panel.confirming);
+        const dialog = findChild(p.panel, "confirmDialog");
+        compare(dialog.message, 'Stop 1 container in “shop”?');
+        const late = {
+            id: "b".repeat(64),
+            name: "late",
+            compose: "shop",
+            state: "running",
+            publishedPorts: []
+        };
+        p.widget.inventory = {
+            containers: p.widget.inventory.containers.concat([late])
+        };
+        compare(dialog.message, 'Stop 1 container in “shop”?');
+        const worker = findChild(p.widget, "operation");
+        compare(worker.launches, 0);
+        keyClick(Qt.Key_Y);
+        compare(worker.command.slice(-3), ["docker-compose-stop", "--project=shop", "--container-id=" + cid]);
+    }
+
+    function test_logsScrollOnInitialLoadAndOnlyFollowSubsequentRefreshes() {
+        const p = dockerPanel(true);
+        p.panel.showLogs();
+        const flick = findChild(p.panel, "logScroll");
+        verify(flick !== null);
+        const logs = p.widget.logs;
+        const payload = "test output\n".repeat(100);
+        function accept(token, text) {
+            verify(logs.accept(token, {
+                ok: true,
+                data: {
+                    text: text,
+                    truncated: false
+                }
+            }));
+        }
+        accept(logs.generation, payload);
+        tryVerify(function () {
+            return flick.contentHeight > flick.height && Math.abs(flick.contentY - (flick.contentHeight - flick.height)) < 1;
+        });
+        flick.contentY = 45;
+        accept(logs.begin(cid, true), payload + payload);
+        wait(0);
+        compare(flick.contentY, 45);
+        p.panel.logFollow = true;
+        flick.contentY = 45;
+        accept(logs.begin(cid, true), payload);
+        tryVerify(function () {
+            return Math.abs(flick.contentY - (flick.contentHeight - flick.height)) < 1;
+        });
+    }
+
+    function test_logFollowAndSearchOnlyRunInTheLogView() {
+        const p = dockerPanel(true);
+        p.panel.showLogs();
+        const worker = findChild(p.widget, "collector");
+        if (p.widget.job.scope !== "logs") {
+            worker.finishStream("");
+            worker.exit(1);
+        }
+        tryVerify(function () {
+            return p.widget.job !== null && p.widget.job.scope === "logs";
+        });
+        worker.finishStream(reply("logs", {
+            containerId: cid,
+            text: "ready\n<ERROR>\n",
+            truncated: false
+        }));
+        worker.exit(0);
+        tryCompare(p.widget.logs, "loading", false);
+
+        keyClick(Qt.Key_Slash);
+        const field = findChild(p.panel, "logSearch");
+        verify(field !== null);
+        verify(field.activeFocus);
+        keyClick(Qt.Key_E);
+        compare(p.panel.logQuery, "e");
+        compare(findChild(p.panel, "logMatchCount").text, "2 of 2 lines");
+        field.text = "error";
+        field.textEdited();
+        compare(findChild(p.panel, "logMatchCount").text, "1 of 2 lines");
+        const text = findChild(p.panel, "logText");
+        compare(text.text, "<ERROR>");
+        compare(text.textFormat, TextEdit.PlainText);
+
+        keyClick(Qt.Key_Return);
+        keyClick(Qt.Key_F);
+        const timer = findChild(p.panel, "logFollowTimer");
+        verify(timer.running);
+        compare(timer.interval, 3000);
+        const token = p.widget.logs.generation;
+        timer.interval = 50;
+        tryVerify(function () {
+            return p.widget.logs.generation > token;
+        });
+        compare(p.widget.logs.text, "ready\n<ERROR>\n", "background fetch preserves displayed logs");
+        p.panel.view = "detail";
+        verify(!timer.running);
+        verify(!p.panel.logFollow);
+        const stopped = p.widget.logs.generation;
+        wait(100);
+        compare(p.widget.logs.generation, stopped);
+    }
+
     function test_confirmDefaultsToCancelAndEnterCancels() {
         const p = dockerPanel(true);
         keyClick(Qt.Key_X);
@@ -811,6 +997,27 @@ TestCase {
         t.widget.start("tools", null);
         compare(t.worker.command.slice(2).join("|"), "tools|--custom-tool=-x|aider");
     }
+    function test_localeChangeUpdatesOpenPanelAndConfirmation() {
+        const p = dockerPanel(true);
+        const header = findChild(p.panel, "dashboardTitle");
+        verify(header !== null);
+        p.panel.toggleSettings();
+        tryCompare(header, "text", "Development Dashboard settings");
+        Commons.I18n.language = "tr";
+        tryCompare(header, "text", "Development Dashboard ayarları");
+        const badge = findChild(p.panel, "statusBadge");
+        compare(badge.label, "Durum rozeti");
+        p.panel.toggleSettings();
+        p.panel.selectTab("Docker");
+        p.panel.openDetail(0);
+        keyClick(Qt.Key_X);
+        const dialog = findChild(p.panel, "confirmDialog");
+        compare(dialog.message, "“<img src=x>” adlı container durdurulsun mu?");
+        compare(dialog.cancelText, "İptal");
+        Commons.I18n.language = "en";
+        tryCompare(dialog, "message", 'Stop container “<img src=x>”?');
+    }
+
     function test_initialTabIsFirstVisibleTab() {
         const t = createWidget();
         t.widget.open();

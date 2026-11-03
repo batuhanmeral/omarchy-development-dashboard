@@ -16,6 +16,7 @@ Column {
     property var legacy: ({})
     property bool imported: false
     property bool managementEnabled: false
+    property bool statusBadge: false
     property string terminal: "default"
     // Style and Color expose their token groups as plain QtObjects; `var` aliases keep qmllint quiet.
     readonly property var fonts: Style.font
@@ -25,7 +26,8 @@ Column {
     readonly property var depthField: depthInput.field
     property color foreground: popupColors.text
     readonly property color dim: Qt.darker(foreground, 1.4)
-    property string validationError: ""
+    property var validationIssues: []
+    readonly property string validationError: Model.validationMessages(validationIssues, strings).join("\n")
     readonly property bool editing: intervalField.activeFocus || portsInput.activeFocus || sqliteInput.activeFocus || rootsInput.activeFocus || toolsInput.activeFocus || editorInput.activeFocus || depthInput.field.activeFocus
 
     property bool dockerEnabled: true
@@ -40,6 +42,11 @@ Column {
 
     spacing: gaps.lg
 
+    Commons.Translations {
+        id: strings
+        directory: Qt.resolvedUrl("i18n")
+    }
+
     function load(source) {
         var cfg = Model.config(source === undefined ? values : source);
         intervalInput.value = cfg.refreshInterval;
@@ -51,13 +58,14 @@ Column {
         portsInput.text = cfg.hiddenPorts;
         sqliteInput.text = cfg.sqliteFiles;
         managementEnabled = cfg.managementEnabled;
+        statusBadge = cfg.statusBadge;
         terminal = cfg.terminal;
         rootsInput.text = cfg.projectRoots;
         depthInput.value = cfg.projectDepth;
         editorInput.text = cfg.editor;
         toolsInput.text = cfg.customTools;
         imported = false;
-        validationError = "";
+        validationIssues = [];
     }
 
     function importLegacy() {
@@ -87,6 +95,7 @@ Column {
         var next = {
             settingsVersion: 2,
             managementEnabled: managementEnabled,
+            statusBadge: statusBadge,
             projectRoots: rootsInput.text.trim(),
             projectDepth: depth,
             terminal: terminal,
@@ -101,9 +110,8 @@ Column {
             compact: compact,
             sqliteFiles: sqliteInput.text.trim()
         };
-        var errors = Model.validateSettings(next);
-        validationError = errors.join("\n");
-        if (!errors.length)
+        validationIssues = Model.validationIssues(next);
+        if (!validationIssues.length)
             saveRequested(next);
     }
 
@@ -141,14 +149,14 @@ Column {
         FieldLabel {
             width: parent.width
             wrapMode: Text.WordWrap
-            text: root.imported ? "Review and press Save. The old plugin's settings are not changed." : "Settings from Development Ports are available to import."
+            text: root.imported ? strings.t("settings.reviewImport") : strings.t("settings.importAvailable")
             visible: root.legacy.found === true
         }
         Ui.Button {
             width: parent.width
             objectName: "importLegacy"
             visible: root.legacy.found === true
-            text: "Import settings from Development Ports"
+            text: strings.t("settings.import")
             bordered: true
             foreground: root.foreground
             onClicked: root.importLegacy()
@@ -157,11 +165,11 @@ Column {
             width: parent.width
             visible: root.legacy.installed === true
             wrapMode: Text.WrapAnywhere
-            text: "Remove the old plugin when done: omarchy plugin remove " + Model.legacyPluginId
+            text: strings.t("settings.removeOld").arg("omarchy plugin remove " + Model.legacyPluginId)
         }
         Ui.Button {
             visible: root.legacy.installed === true
-            text: "Copy removal command"
+            text: strings.t("settings.copyRemove")
             bordered: true
             foreground: root.foreground
             onClicked: root.copyRequested("omarchy plugin remove " + Model.legacyPluginId)
@@ -170,8 +178,8 @@ Column {
 
     Ui.Toggle {
         width: parent.width
-        label: "Management actions"
-        description: "Start, stop and restart containers and stop your own development processes. Every action is started by you; disruptive ones ask first."
+        label: strings.t("settings.management")
+        description: strings.t("settings.managementHelp")
         checked: root.managementEnabled
         foreground: root.foreground
         onClicked: root.managementEnabled = !root.managementEnabled
@@ -180,7 +188,7 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "Project folders"
+            text: strings.t("settings.projectFolders")
         }
         PlainArea {
             id: rootsInput
@@ -190,19 +198,19 @@ Column {
         Ui.NumberField {
             id: depthInput
             objectName: "projectDepth"
-            label: "Scan depth"
+            label: strings.t("settings.scanDepth")
             from: 1
             to: 4
             foreground: root.foreground
         }
         FieldLabel {
-            text: "Terminal"
+            text: strings.t("action.terminal")
         }
         Ui.ButtonGroup {
             options: Model.terminals.map(function (name) {
                 return {
                     value: name,
-                    label: name === "default" ? "Default" : name
+                    label: name === "default" ? strings.t("settings.defaultTerminal") : name
                 };
             })
             value: root.terminal
@@ -212,17 +220,17 @@ Column {
             }
         }
         FieldLabel {
-            text: "Editor"
+            text: strings.t("action.editor")
         }
         Ui.TextField {
             id: editorInput
             objectName: "editor"
             width: parent.width
-            placeholderText: "Omarchy default editor"
+            placeholderText: strings.t("settings.editorPlaceholder")
             foreground: root.foreground
         }
         FieldLabel {
-            text: "Custom AI tools"
+            text: strings.t("settings.customTools")
         }
         PlainArea {
             id: toolsInput
@@ -233,8 +241,8 @@ Column {
 
     Ui.Toggle {
         width: parent.width
-        label: "Docker"
-        description: "List containers, images and volumes."
+        label: strings.t("tab.docker")
+        description: strings.t("settings.dockerHelp")
         checked: root.dockerEnabled
         foreground: root.foreground
         onClicked: root.dockerEnabled = !root.dockerEnabled
@@ -242,8 +250,18 @@ Column {
 
     Ui.Toggle {
         width: parent.width
-        label: "Compact rows"
-        description: "Fit more entries in the list."
+        objectName: "statusBadge"
+        label: strings.t("settings.badge")
+        description: strings.t("settings.badgeHelp")
+        checked: root.statusBadge
+        foreground: root.foreground
+        onClicked: root.statusBadge = !root.statusBadge
+    }
+
+    Ui.Toggle {
+        width: parent.width
+        label: strings.t("settings.compact")
+        description: strings.t("settings.compactHelp")
         checked: root.compact
         foreground: root.foreground
         onClicked: root.compact = !root.compact
@@ -252,7 +270,7 @@ Column {
     Ui.NumberField {
         id: intervalInput
         objectName: "refreshInterval"
-        label: "Refresh interval while open (seconds)"
+        label: strings.t("settings.interval")
         from: 2
         to: 120
         foreground: root.foreground
@@ -262,21 +280,21 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "Show ports"
+            text: strings.t("settings.showPorts")
         }
         Ui.ButtonGroup {
             options: [
                 {
                     value: "all",
-                    label: "All"
+                    label: strings.t("filter.all")
                 },
                 {
                     value: "localhost",
-                    label: "Local only"
+                    label: strings.t("settings.localOnly")
                 },
                 {
                     value: "lan",
-                    label: "Exposed only"
+                    label: strings.t("settings.exposedOnly")
                 }
             ]
             value: root.exposure
@@ -291,21 +309,21 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "Sort by"
+            text: strings.t("settings.sort")
         }
         Ui.ButtonGroup {
             options: [
                 {
                     value: "port",
-                    label: "Port"
+                    label: strings.t("settings.sortPort")
                 },
                 {
                     value: "name",
-                    label: "Name"
+                    label: strings.t("fact.name")
                 },
                 {
                     value: "state",
-                    label: "State"
+                    label: strings.t("fact.state")
                 }
             ]
             value: root.sortBy
@@ -320,7 +338,7 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "Tabs"
+            text: strings.t("settings.tabs")
         }
         Flow {
             width: parent.width
@@ -330,7 +348,7 @@ Column {
                 model: Model.tabNames
                 Ui.Button {
                     required property string modelData
-                    text: Model.tabLabel(modelData)
+                    text: Model.tabLabel(modelData, strings)
                     selected: root.tabs.indexOf(modelData) >= 0
                     bordered: true
                     focusable: true
@@ -345,7 +363,7 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "Hidden ports"
+            text: strings.t("settings.hiddenPorts")
         }
         Ui.TextField {
             id: portsInput
@@ -360,7 +378,7 @@ Column {
         width: parent.width
         spacing: root.gaps.md
         FieldLabel {
-            text: "SQLite files (one absolute path per line; contents are never read)"
+            text: strings.t("settings.sqlite")
             width: parent.width
             wrapMode: Text.WordWrap
         }
@@ -406,7 +424,7 @@ Column {
         spacing: root.gaps.md
         Ui.Button {
             objectName: "save"
-            text: "Save"
+            text: strings.t("common.save")
             bordered: true
             focusable: true
             selected: true
@@ -414,7 +432,7 @@ Column {
             onClicked: root.submit()
         }
         Ui.Button {
-            text: "Cancel"
+            text: strings.t("common.cancel")
             bordered: true
             focusable: true
             foreground: root.foreground

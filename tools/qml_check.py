@@ -44,6 +44,7 @@ def main() -> int:
         QT_QPA_PLATFORM="offscreen",
         QT_QPA_PLATFORMTHEME="",
         QT_QUICK_CONTROLS_STYLE="Basic",
+        QML_XHR_ALLOW_FILE_READ="1",
         GSETTINGS_BACKEND="memory",
     )
     # Theme-only fixtures isolate Settings from Quickshell's statically linked plugins.

@@ -336,3 +336,92 @@ class ActionsTests(unittest.TestCase):
                 if child.poll() is None:
                     child.terminate()
                 child.wait(timeout=3)
+
+    def test_compose_action_discovers_members_and_reports_partial_failure(self):
+        other_id = "b" * 64
+        runner = Mock()
+        runner.run.side_effect = [
+            f"{CID}\n{other_id}\n{CID}\n",
+            '"running"',
+            "",
+            '"exited"',
+            c.CommandFailed("docker failed", "No such container"),
+        ]
+        result = self.a.docker_compose_action(
+            "docker-compose-stop", "shop_prod.v2", [CID, other_id], runner
+        )
+        self.assertEqual(result["project"], "shop_prod.v2")
+        self.assertEqual(result["containers"], [{"id": CID, "state": "exited"}])
+        self.assertEqual(result["failed"][0]["id"], other_id)
+        self.assertIn("no longer exists", result["failed"][0]["error"])
+        calls = [call.args[0][4:] for call in runner.run.call_args_list]
+        self.assertEqual(
+            calls[0],
+            ["ls", "-aq", "--no-trunc", "--filter=label=com.docker.compose.project=shop_prod.v2"],
+        )
+        self.assertEqual(calls[2], ["stop", "--time", "10", CID])
+        self.assertEqual(len(calls), 5)
+
+    def test_compose_invalid_name_or_members_never_runs_a_container_action(self):
+        for project in ("--all", "shop\n", "A", "a" * 65, "one/two"):
+            runner = Mock()
+            with self.assertRaisesRegex(c.CollectionError, "invalid Compose project"):
+                self.a.docker_compose_action("docker-compose-start", project, [CID], runner)
+            runner.run.assert_not_called()
+        for members in (CID + "\nmalformed", "\n".join(f"{index:064x}" for index in range(65))):
+            runner = Mock()
+            runner.run.return_value = members
+            with self.assertRaises(c.CollectionError):
+                self.a.docker_compose_action("docker-compose-restart", "shop", [CID], runner)
+            self.assertEqual(runner.run.call_count, 1)
+
+    def test_compose_cli_keeps_partial_results_and_returns_failure(self):
+        result = {
+            "project": "shop",
+            "containers": [],
+            "failed": [{"id": CID, "error": "operation failed"}],
+        }
+        out = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["actions.py", "docker-compose-restart", "--project=shop", f"--container-id={CID}"],
+            ),
+            patch("sys.stdout", out),
+            patch.object(self.a, "docker_compose_action", return_value=result) as action,
+        ):
+            self.assertEqual(self.a.main(), 1)
+        action.assert_called_once_with("docker-compose-restart", "shop", [CID])
+        self.assertEqual(json.loads(out.getvalue())["data"], result)
+
+    def test_compose_changes_only_members_captured_by_the_caller(self):
+        later = "b" * 64
+        disappeared = "c" * 64
+        runner = Mock()
+        runner.run.side_effect = [f"{CID}\n{later}\n", '"running"', "", '"exited"']
+        result = self.a.docker_compose_action(
+            "docker-compose-stop", "shop", [CID, disappeared], runner
+        )
+        self.assertEqual(result["containers"], [{"id": CID, "state": "exited"}])
+        self.assertEqual(result["failed"], [])
+        changed = [call.args[0][-1] for call in runner.run.call_args_list if "stop" in call.args[0]]
+        self.assertEqual(changed, [CID])
+
+    def test_compose_rejects_empty_intersection_and_empty_discovery(self):
+        for output in ("", "b" * 64):
+            with self.subTest(output=output):
+                runner = Mock()
+                runner.run.return_value = output
+                with self.assertRaisesRegex(
+                    c.CollectionError, "No containers of this Compose project remain"
+                ):
+                    self.a.docker_compose_action("docker-compose-stop", "shop", [CID], runner)
+                self.assertEqual(runner.run.call_count, 1)
+
+    def test_compose_rejects_invalid_snapshots_without_contacting_docker(self):
+        for members in ([], ["invalid"], [CID] * 65):
+            runner = Mock()
+            with self.assertRaises(c.CollectionError):
+                self.a.docker_compose_action("docker-compose-start", "shop", members, runner)
+            runner.run.assert_not_called()

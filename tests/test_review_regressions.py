@@ -74,9 +74,10 @@ class ReviewRegressions(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            (root / ".git").mkdir()
             for definition in ("filter.fixture.clean", "include.path", "includeif.gitdir:*/.path"):
                 runner = Mock()
-                runner.run.return_value = definition + "\n"
+                runner.run.return_value = "local\t" + definition + "\n"
                 result = projects.git_status(root, runner)
                 self.assertEqual(result["gitState"], "unknown")
                 self.assertEqual(runner.run.call_count, 1)
