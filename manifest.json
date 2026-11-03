@@ -5,14 +5,23 @@
   "version": "1.0.0",
   "author": "Development Ports contributors",
   "license": "MIT",
-  "description": "Read-only local TCP, Docker and database inventory for the Omarchy bar.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "description": "Read-only view of listening ports, Docker containers, images, volumes and databases on your machine.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
   "barWidget": {
     "displayName": "Development Ports",
-    "description": "Inspect development services and Docker resources",
+    "description": "Listening ports and Docker resources at a glance",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "aliases": [
+      "ports",
+      "docker",
+      "dev-ports"
+    ]
   }
 }
