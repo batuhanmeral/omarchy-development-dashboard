@@ -90,11 +90,13 @@ class Runner:
         env.pop("DOCKER_CONTEXT", None)
         try:
             executable = shutil.which(argv[0], path=search_path)
-            if executable is None:
+            if executable is None or not os.path.isabs(executable):
                 raise FileNotFoundError
             resolved_argv = [executable, *argv[1:]]
+            # Internal callers build argv and environment separately from external data.
+            # The executable is absolute and no shell interprets the individual arguments.
             child = subprocess.Popen(  # noqa: S603 — internal fixed argv, never a shell
-                resolved_argv,
+                resolved_argv,  # nosemgrep: dangerous-subprocess-use-tainted-env-args
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

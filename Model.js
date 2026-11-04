@@ -108,7 +108,8 @@ function config(raw) {
         compact: raw.compact !== false,
         sqliteFiles: typeof raw.sqliteFiles === "string" ? raw.sqliteFiles : "",
         settingsVersion: 2,
-        managementEnabled: raw.managementEnabled === true,
+        // On unless turned off: every disruptive action still asks for confirmation.
+        managementEnabled: raw.managementEnabled !== false,
         statusBadge: raw.statusBadge === true,
         projectRoots: lines(raw.projectRoots).filter(validRoot).slice(0, 16).join("\n"),
         projectDepth: Number.isInteger(Number(raw.projectDepth)) && Number(raw.projectDepth) >= 1 && Number(raw.projectDepth) <= 4 ? Number(raw.projectDepth) : 3,
@@ -951,7 +952,7 @@ function availableActions(view, cfg, state, strings) {
     if (view.kind === "port" && cfg.managementEnabled && canTerminateProcess(row)) add("terminate", translate(strings, "action.terminate", "Stop process"), "x", true, true);
     if (view.kind === "project") {
         add("terminal", translate(strings, "action.terminal", "Terminal"), "t"); add("editor", translate(strings, "action.editor", "Editor"), "e"); add("files", translate(strings, "action.files", "Files"), "f");
-        add("copy", translate(strings, "action.copy", "Copy path"), "c"); add("ai", translate(strings, "action.ai", "AI tools"), "a");
+        add("ai", translate(strings, "action.ai", "AI tools"), "a");
     }
     return output;
 }

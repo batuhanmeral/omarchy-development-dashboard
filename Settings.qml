@@ -15,7 +15,7 @@ Column {
     property var values: ({})
     property var legacy: ({})
     property bool imported: false
-    property bool managementEnabled: false
+    property bool managementEnabled: true
     property bool statusBadge: false
     property string terminal: "default"
     // Style and Color expose their token groups as plain QtObjects; `var` aliases keep qmllint quiet.

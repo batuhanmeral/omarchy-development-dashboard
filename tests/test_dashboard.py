@@ -205,3 +205,13 @@ class DashboardContracts(unittest.TestCase):
         self.assertIsNone(c.normalized_container(dict(id="a", workdir="relative"))["composeDir"])
         self.assertIn(".Config.ExposedPorts", c.CONTAINER_FORMAT)
         self.assertIn("com.docker.compose.project.working_dir", c.CONTAINER_FORMAT)
+
+    def test_runner_rejects_a_nonabsolute_resolved_executable(self):
+        with (
+            patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True),
+            patch.object(c.shutil, "which", return_value="./fixture"),
+            patch.object(c.subprocess, "Popen", side_effect=OSError) as child,
+            self.assertRaisesRegex(c.CollectionError, "fixture unavailable"),
+        ):
+            c.Runner().run(["fixture"])
+        self.assertEqual(child.call_count, 0)

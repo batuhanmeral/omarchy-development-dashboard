@@ -7,10 +7,10 @@ the processes behind them, Docker containers, images and volumes, databases, you
 projects, and the AI coding assistants installed on your machine. It is a single bar icon
 and a keyboard-driven popup; there is no separate window, daemon or background service.
 
-Out of the box it only **reads**. Starting, stopping or restarting containers and
-stopping your own development processes are **management actions**. They are off until
-you switch them on in settings, and each one starts only when you trigger it. Disruptive
-ones ask for confirmation first.
+Nothing changes unless you ask. Starting, stopping or restarting containers and stopping
+your own development processes are **management actions**: each one starts only when you
+trigger it, and stopping or restarting asks for confirmation first. They are available by
+default; turn **Management actions** off in settings for a strictly read-only panel.
 
 ![Panel preview](preview.png)
 
@@ -85,7 +85,7 @@ Keys `1`–`4` work as they did in Development Ports.
 | `R` | Container: restart\* |
 | `y` | Confirm in a confirmation dialog (it opens with **Cancel** selected) |
 
-\* Management action: needs **Management actions** turned on in settings.
+\* Management action: hidden when **Management actions** is turned off in settings.
 
 ## Settings
 
@@ -95,7 +95,7 @@ when you press **Save**.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Docker | on | Read Docker containers, images and volumes |
-| Management actions | **off** | Allows container start/stop/restart and stopping your own processes |
+| Management actions | on | Container start/stop/restart and stopping your own processes; turn off for read-only |
 | Refresh interval | 5 s | While the panel is open; 2–120 s |
 | Show ports / hidden ports / sort / compact rows / tabs | | As in Development Ports |
 | SQLite files | empty | Absolute paths; contents are never read |
@@ -107,9 +107,11 @@ when you press **Save**.
 
 ## Security and privacy
 
-- **Read-only by default.** Monitoring code (`backend/collector.py`) never changes
-  anything. State-changing and launch operations live in `backend/actions.py`. Each one
-  is a named operation with validated arguments.
+- **Monitoring and changes are separate.** Monitoring code (`backend/collector.py`) never
+  changes anything. State-changing and launch operations live in `backend/actions.py`. Each
+  one is a named operation with validated arguments, started only by you; stop, restart and
+  process termination ask for confirmation (the dialog opens on **Cancel**). Turn
+  **Management actions** off to hide them entirely.
 - **No shell.** Every command is run with a fixed argument list (`shell=False`), a timeout
   and an output limit. Settings, names and paths are never pasted into a command string,
   and there are no command templates.
