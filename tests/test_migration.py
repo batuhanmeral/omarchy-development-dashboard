@@ -3,6 +3,7 @@
 import importlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -37,7 +38,7 @@ class MigrationTests(unittest.TestCase):
         ):
             self.file.write_bytes(content)
             self.assertEqual(self.m.legacy_settings(self.config, self.home), expected)
-        with patch.object(Path, "open", side_effect=PermissionError):
+        with patch.object(os, "open", side_effect=PermissionError):
             self.assertEqual(self.m.legacy_settings(self.config, self.home), expected)
 
     def test_first_entry_whitelist_types_installation_and_read_only(self):
@@ -67,7 +68,7 @@ class MigrationTests(unittest.TestCase):
         )
         self.file.write_text(json.dumps(data))
         before = self.file.read_bytes(), self.file.stat().st_mtime_ns
-        installed = self.home / ".config/omarchy/plugins/io.github.batuhanmeral.devports"
+        installed = self.config / "omarchy/plugins/io.github.batuhanmeral.devports"
         installed.mkdir(parents=True)
         result = self.m.legacy_settings(self.config, self.home)
         self.assertEqual(
@@ -103,6 +104,30 @@ class MigrationTests(unittest.TestCase):
         )
         self.file.write_text(json.dumps(data))
         self.assertEqual(self.m.legacy_settings(self.config, self.home)["legacy"]["settings"], {})
+
+    def test_legacy_config_rejects_fifo_without_blocking_and_follows_regular_symlink(self):
+        os.mkfifo(self.file)
+        with (
+            patch.object(
+                Path, "open", side_effect=AssertionError("Must not open FIFO in blocking mode")
+            ),
+            patch.object(os, "open", wraps=os.open) as opener,
+        ):
+            self.assertFalse(self.m.legacy_settings(self.config, self.home)["legacy"]["found"])
+        self.assertTrue(opener.call_args.args[1] & os.O_NONBLOCK)
+        self.file.unlink()
+        target = self.file.with_name("settings.json")
+        target.write_text(json.dumps({"bar": {"layout": {"left": [{"id": self.m.LEGACY_ID}]}}}))
+        self.file.symlink_to(target)
+        self.assertTrue(self.m.legacy_settings(self.config, self.home)["legacy"]["found"])
+
+    def test_installed_follows_xdg_config_home(self):
+        default_plugin = self.home / ".config/omarchy/plugins" / self.m.LEGACY_ID
+        default_plugin.mkdir(parents=True)
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config)}):
+            self.assertFalse(self.m.legacy_settings(home=self.home)["legacy"]["installed"])
+            (self.config / "omarchy/plugins" / self.m.LEGACY_ID).mkdir(parents=True)
+            self.assertTrue(self.m.legacy_settings(home=self.home)["legacy"]["installed"])
 
     def test_environment_defaults_and_collector_cli(self):
         with (

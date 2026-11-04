@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -91,6 +92,86 @@ class DashboardContracts(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(c.redact_command(argv), expected)
         self.assertEqual(len(c.redact_command(["x" * 1000])), 512)
+
+    def test_redaction_bounds_large_arguments_and_stops_at_output_limit(self):
+        start = time.perf_counter()
+        self.assertEqual(c.redact_command(["0" * 65536]), "***")
+        self.assertLess(time.perf_counter() - start, 0.05)
+
+        class BoundedArgs(list):
+            def __iter__(self):
+                yield "0" * 512
+                raise AssertionError("Visited arguments past the output budget")
+
+        self.assertEqual(c.redact_command(BoundedArgs()), "0" * 512)
+        self.assertEqual(
+            c.redact_command(["0" * 495, "https://user:" + "4" * 128 + "@example.test"]),
+            "0" * 495 + " https://***@exam",
+        )
+
+    def test_process_metadata_redacts_a_large_cmdline_promptly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proc = root / "321"
+            proc.mkdir()
+            (proc / "stat").write_text("321 (fixture) " + " ".join(["S"] + ["0"] * 18 + ["1234"]))
+            (proc / "comm").write_text("fixture")
+            (proc / "cmdline").write_bytes(b"fixture\0" + b"6" * 60000 + b"\0")
+            start = time.perf_counter()
+            self.assertEqual(c.process_metadata(321, root)["command"], "fixture ***")
+            self.assertLess(time.perf_counter() - start, 0.05)
+
+    def test_redacts_credentials_in_cli_dsn_headers_and_provider_tokens(self):
+        cases = [
+            (["curl", "-u", "alice:fixture"], "curl -u alice:***"),
+            (["curl", "--user=alice:fixture"], "curl --user=alice:***"),
+            (["curl", "--user", "alice"], "curl --user alice"),
+            (["u:fixture@tcp(h)/d"], "***@tcp(h)/d"),
+            (["--dsn=u:fixture@tcp(h)/d"], "--dsn=***@tcp(h)/d"),
+            (["Server=h;Password=fixture;"], "Server=h;Password=***;"),
+            (["--dsn=Server=h;Pwd=fixture&other=abc"], "--dsn=Server=h;Pwd=***&other=abc"),
+            (["Cookie: sid=fixture"], "Cookie: ***"),
+            (["--pat", "fixture", "ok"], "--pat *** ok"),
+            (["pat", "fixture"], "pat ***"),
+            (["pat=fixture"], "pat=***"),
+        ]
+        for prefix in ("ghp_", "gho_", "github_pat_", "glpat-", "sk-", "xoxa-", "xoxb-", "xoxp-"):
+            cases.append((["option=" + prefix + "fixture"], "option=***"))
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(c.redact_command(argv), expected)
+
+    def test_runner_strips_ambient_git_variables_and_relative_path_entries(self):
+        inherited = {
+            "PATH": ":tools:/usr/bin:.:/bin:",
+            "GIT_DIR": "/fixture/example",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "example.key",
+            "GIT_CONFIG_VALUE_0": "fixture",
+            "GIT_SSH_COMMAND": "fixture",
+            "GIT_PROXY_COMMAND": "fixture",
+            "GIT_EXEC_PATH": "/fixture/example",
+            "GIT_ASKPASS": "fixture",
+            "GIT_CONFIG_GLOBAL": "/fixture/example",
+            "GIT_TERMINAL_PROMPT": "1",
+            "UNCHANGED": "yes",
+        }
+        with (
+            patch.dict(os.environ, inherited, clear=True),
+            patch.object(c.shutil, "which", return_value="/usr/bin/git") as which,
+            patch.object(c.subprocess, "Popen", side_effect=OSError) as child,
+            self.assertRaisesRegex(c.CollectionError, "git unavailable"),
+        ):
+            c.Runner().run(
+                ["git", "version"], env={"GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"}
+            )
+        which.assert_called_once_with("git", path="/usr/bin:/bin")
+        env = child.call_args.kwargs["env"]
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("GIT_")},
+            {"GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
+        )
+        self.assertEqual(env["UNCHANGED"], "yes")
 
     def test_process_metadata_new_fields_and_missing_command(self):
         with tempfile.TemporaryDirectory() as tmp:

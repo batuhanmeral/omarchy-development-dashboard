@@ -137,6 +137,26 @@ class ActionsTests(unittest.TestCase):
         with self.assertRaises(c.CollectionError):
             self.process_call(pidfd_open=Mock(side_effect=PermissionError()))
 
+    def test_process_termination_protects_rootless_container_helpers(self):
+        names = (
+            "rootlesskit",
+            "rootlessport",
+            "slirp4netns",
+            "pasta",
+            "conmon",
+            "containerd-shim",
+            "containerd-shim-runc-v2",
+            "podman",
+            "buildkitd",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                self.proc(name=name)
+                sender = Mock()
+                with self.assertRaisesRegex(c.CollectionError, "critical"):
+                    self.process_call(send_signal=sender)
+                sender.assert_not_called()
+
     def test_process_ownership_identity_critical_names_and_listener_checks(self):
         proc = self.proc(ticks="999")
         with self.assertRaisesRegex(c.CollectionError, "PID reused"):

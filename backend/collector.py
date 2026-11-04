@@ -75,12 +75,21 @@ class Runner:
         if remaining <= 0:
             raise CollectionError("request budget exceeded")
         deadline = time.monotonic() + min(remaining, self.timeout if timeout is None else timeout)
-        env = dict(os.environ) | (env or {})
+        inherited = dict(os.environ)
+        if Path(argv[0]).name == "git":
+            inherited = {
+                key: value for key, value in inherited.items() if not key.startswith("GIT_")
+            }
+        env = inherited | (env or {})
+        search_path = os.pathsep.join(
+            entry for entry in env.get("PATH", os.defpath).split(os.pathsep) if os.path.isabs(entry)
+        )
+        env["PATH"] = search_path
         env["LC_ALL"] = "C"
         # Explicit local --host always wins over ambient Docker contexts.
         env.pop("DOCKER_CONTEXT", None)
         try:
-            executable = shutil.which(argv[0], path=env.get("PATH"))
+            executable = shutil.which(argv[0], path=search_path)
             if executable is None:
                 raise FileNotFoundError
             resolved_argv = [executable, *argv[1:]]
@@ -166,40 +175,74 @@ SECRET_NAME = re.compile(
     re.IGNORECASE,
 )
 SECRET_HEADER = re.compile(r"(?:^|=)([A-Za-z0-9_-]+):(\s*)(.*)$", re.DOTALL)
-URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)(?=[^/\s?#]*@)[^\s]*@")
+URL_USERINFO = re.compile(r"(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*://)(?=[^/\s?#]*@)[^\s]*@")
+DSN_USERINFO = re.compile(r"""(?<![^\s="'(])[^=\s:@/;"'()]+:(?!//)[^\s@]+@""")
+PASSWORD_VALUE = re.compile(r"\b((?:password|pwd)=)[^;&\s]*", re.IGNORECASE)
+PROVIDER_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:ghp_|gho_|github_pat_|glpat-|sk-|xox[abp]-)[A-Za-z0-9_-]+"
+)
+MAX_COMMAND_CHARS = 512
+MAX_ARGUMENT_CHARS = 4096
+
+
+def redact_inline(value: str) -> str:
+    value = URL_USERINFO.sub(r"\1***@", value)
+    value = DSN_USERINFO.sub("***@", value)
+    value = PASSWORD_VALUE.sub(r"\1***", value)
+    return PROVIDER_TOKEN.sub("***", value)
+
+
+def redact_user(value: str) -> str:
+    user, separator, _ = value.partition(":")
+    return redact_inline(user) + (":***" if separator else "")
+
+
+def redact_argument(value: str, next_value: str) -> tuple[str, str]:
+    if next_value == "secret" or len(value) > MAX_ARGUMENT_CHARS:
+        return "***", ""
+    if next_value == "user":
+        return redact_user(value), ""
+
+    header = SECRET_HEADER.search(value)
+    if header and (SECRET_NAME.search(header[1]) or header[1].lower() in ("cookie", "set-cookie")):
+        prefix = value[: header.start(3)]
+        return (prefix + "***", "") if header[3] else (prefix.rstrip(), "secret")
+
+    name, separator, argument = value.partition("=")
+    if name in ("-u", "--user"):
+        return (name + separator + redact_user(argument), "") if separator else (name, "user")
+    if value.startswith("-u") and ":" in value[2:]:
+        return "-u" + redact_user(value[2:]), ""
+    if value.startswith(("-p", "-P")):
+        if len(value) == 2:
+            return value, "secret"
+        return value[:2] + ("=" if value[2] == "=" else "") + "***", ""
+    if name.lower().lstrip("-") == "pat" or (
+        SECRET_NAME.search(name) and (value.startswith("-") or separator)
+    ):
+        return (name + "=***", "") if separator else (name, "secret")
+    return redact_inline(value), ""
 
 
 def redact_command(argv: list[str]) -> str:
-    result = []
-    hide_next = False
+    parts: list[str] = []
+    remaining = MAX_COMMAND_CHARS
+    next_value = ""
     for value in argv:
-        if hide_next:
-            result.append("***")
-            hide_next = False
-            continue
-        header = SECRET_HEADER.search(value)
-        if header and SECRET_NAME.search(header[1]):
-            prefix = value[: header.start(3)]
-            if header[3]:
-                result.append(prefix + "***")
-            else:
-                result.append(prefix.rstrip())
-                hide_next = True
-            continue
-        if value.startswith(("-p", "-P")):
-            if len(value) == 2:
-                result.append(value)
-                hide_next = True
-            else:
-                result.append(value[:2] + ("=" if value[2] == "=" else "") + "***")
-            continue
-        name, separator, _ = value.partition("=")
-        if SECRET_NAME.search(name) and (value.startswith("-") or separator):
-            result.append(name + "=***" if separator else name)
-            hide_next = not separator
-        else:
-            result.append(URL_USERINFO.sub(r"\1***@", value))
-    return clean(" ".join(result), 512)
+        if parts:
+            parts.append(" ")
+            remaining -= 1
+            if remaining == 0:
+                break
+        # Mask the entire argument before clipping, even when its @ or delimiters
+        # are past the output budget.
+        masked, next_value = redact_argument(value, next_value)
+        part = clean(masked, remaining)
+        parts.append(part)
+        remaining -= len(part)
+        if remaining == 0:
+            break
+    return "".join(parts)
 
 
 def endpoint(value: str) -> tuple[str, int] | None:

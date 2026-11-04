@@ -59,6 +59,13 @@ CRITICAL = {
     "ssh-agent",
     "dockerd",
     "containerd",
+    "rootlesskit",
+    "rootlessport",
+    "slirp4netns",
+    "pasta",
+    "conmon",
+    "podman",
+    "buildkitd",
     "docker-proxy",
     "xdg-desktop-por",
     "xdg-document-po",
@@ -241,7 +248,11 @@ def process_terminate(
             executable = Path(os.path.realpath(os.readlink(directory / "exe")))
         except FileNotFoundError:
             executable = Path("/")
-        if comm in CRITICAL or Path("/usr/lib/systemd") in executable.parents:
+        if (
+            comm in CRITICAL
+            or comm.startswith("containerd-shim")
+            or Path("/usr/lib/systemd") in executable.parents
+        ):
             raise CollectionError("Cannot terminate a critical system process")
         runner = runner or Runner()
         if not listening_on(runner.run(["ss", "-H", "-lntp"]), pid, port):

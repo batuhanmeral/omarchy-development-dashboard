@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +27,18 @@ def legacy_settings(config_home: Path | None = None, home: Path | None = None) -
     home = home or Path.home()
     config_home = config_home or Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
     legacy: dict[str, Any] = dict(
-        found=False, installed=(home / ".config/omarchy/plugins" / LEGACY_ID).is_dir(), settings={}
+        found=False, installed=(config_home / "omarchy/plugins" / LEGACY_ID).is_dir(), settings={}
     )
     try:
-        with (config_home / "omarchy/shell.json").open("rb") as stream:
-            raw = stream.read(MAX_CONFIG_BYTES + 1)
+        # Symlinked configurations are supported, but their targets must be regular files.
+        fd = os.open(config_home / "omarchy/shell.json", os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_CONFIG_BYTES:
+                return dict(legacy=legacy)
+            raw = os.read(fd, MAX_CONFIG_BYTES + 1)
+        finally:
+            os.close(fd)
         if len(raw) > MAX_CONFIG_BYTES:
             return dict(legacy=legacy)
         config = json.loads(raw)
