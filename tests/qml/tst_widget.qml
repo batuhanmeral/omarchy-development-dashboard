@@ -315,6 +315,58 @@ TestCase {
         compare(p.panel.view, "detail");
     }
 
+    function walkItems(item, out) {
+        if (!item)
+            return out;
+        out.push(item);
+        for (let i = 0; i < item.children.length; i++)
+            walkItems(item.children[i], out);
+        return out;
+    }
+    function test_detailButtonsArePlainTextAndActionsFollowLogs() {
+        const p = openPanel();
+        // The production popup uses its own window; expose the Item-based test popup.
+        suite.visible = true;
+        p.panel.parent.visible = true;
+        // No managementEnabled key: management actions are on by default.
+        p.widget.settings = {
+            settingsVersion: 2,
+            dockerEnabled: true
+        };
+        p.widget.inventory = {
+            containers: [
+                {
+                    id: cid,
+                    name: "web",
+                    state: "running",
+                    publishedPorts: []
+                }
+            ]
+        };
+        p.panel.selectTab("Docker");
+        const copyGlyph = "\u{f018f}";
+        verify(!walkItems(p.panel.contentItem || p.panel, []).some(function (item) {
+            return item.visible && item.iconText === copyGlyph;
+        }), "list rows have no copy button");
+        p.panel.openDetail(0);
+        const stop = findChild(p.panel, "detailAction-stop");
+        verify(stop !== null && stop.visible, "stop is offered without opting in");
+        const logs = findChild(p.panel, "detailViewLogs");
+        verify(logs !== null && logs.visible);
+        compare(stop.parent, logs.parent, "actions sit in the logs row");
+        const siblings = Array.prototype.slice.call(logs.parent.children);
+        verify(siblings.indexOf(stop) > siblings.indexOf(logs), "actions come after the logs button");
+        const buttons = walkItems(p.panel.contentItem || p.panel, []).filter(function (item) {
+            return item.visible && item.iconText !== undefined && typeof item.text === "string" && item.text !== "";
+        });
+        verify(buttons.length >= 3);
+        buttons.forEach(function (button) {
+            compare(button.iconText, "", "text button carries an icon: " + button.text);
+            verify(!/[()]/.test(button.text), "text button shows a shortcut: " + button.text);
+            verify(!/copy|kopyala/i.test(button.text), "copy button remains: " + button.text);
+        });
+    }
+
     function dockerPanel(management) {
         const p = openPanel();
         p.widget.settings = {

@@ -128,7 +128,6 @@ Column {
             required property string subtitle
             required property string badge
             required property string tone
-            required property string copyText
             width: list.width
             implicitHeight: Style.space(root.panel.cfg.compact ? 40 : 50)
             hasCursor: root.panel.cursor === index
@@ -189,15 +188,6 @@ Column {
                 Badge {
                     text: rowItem.badge
                     tint: root.panel.toneColor(rowItem.tone)
-                }
-                Ui.PanelActionButton {
-                    // nf-md-content_copy
-                    iconText: "\u{f018f}"
-                    tooltipText: root.strings.t("list.copy").arg(rowItem.copyText)
-                    foreground: root.panel.foreground
-                    opacity: rowItem.hasCursor ? 1 : 0
-                    enabled: rowItem.hasCursor && rowItem.copyText !== ""
-                    onClicked: root.panel.hostWidget.copyText(rowItem.copyText)
                 }
             }
         }

@@ -340,7 +340,8 @@ test('dashboard identity, fixed tab keys and versioned visibility migration', ()
     assert.equal(M.tabKey('1'), 'Localhost');
     assert.equal(M.tabKey('2', M.config({settingsVersion:2,visibleTabs:'Localhost'})), '');
     assert.equal(M.tabKey('9'), '');
-    assert.equal(M.config({}).managementEnabled, false);
+    assert.equal(M.config({}).managementEnabled, true);
+    assert.equal(M.config({managementEnabled:false}).managementEnabled, false);
     assert.equal(M.config({}).projectDepth, 3);
 });
 
@@ -354,7 +355,7 @@ test('dashboard settings validate roots, bounds, editor and custom grammar', () 
     for (const line of ['Name | ../exec','Name | /a/../exec', 'Name | $(id)', 'Name | exe | '+Array(17).fill('a').join(' '), 'Name | exe | a\0b','Name | exe | a | b'])
         assert.throws(()=>M.parseCustomTools(line),line);
     const old=M.legacySettings({refreshInterval:9, compact:false, evil:'x',managementEnabled:true});
-    assert.equal(old.refreshInterval,9); assert.equal(old.compact,false); assert.equal(old.managementEnabled,false); assert.equal(old.evil,undefined);
+    assert.equal(old.refreshInterval,9); assert.equal(old.compact,false); assert.equal(old.managementEnabled,true); assert.equal(old.evil,undefined);
     assert.equal(M.legacySettings({refreshInterval:'9'}).refreshInterval,5);
 });
 
@@ -408,17 +409,17 @@ test('project facts report branch and related services', () => {
     assert.equal(facts.find(f=>f.label==='Services').value,'2');
 });
 
-test('management is opt in and never terminates container or unowned listeners', () => {
+test('management can be turned off and never terminates container or unowned listeners', () => {
     const cfg=M.config({managementEnabled:true});
     const c=M.viewRow(container(),'container');
-    assert.deepEqual(clone(M.availableActions(c,M.config({}),{}).map(a=>a.id)),['open']);
+    assert.deepEqual(clone(M.availableActions(c,M.config({managementEnabled:false}),{}).map(a=>a.id)),['open']);
     for (const id of ['stop','restart']) assert.ok(M.availableActions(c,cfg,{}).find(a=>a.id===id).confirm);
     assert.ok(M.availableActions(M.viewRow({...container(),state:'exited'},'container'),cfg,{}).some(a=>a.id==='start'));
     const p=M.viewRow({...port(),ownedByUser:true,startTicks:'123'},'port');
-    assert.equal(M.canManage(p,cfg),true); assert.equal(M.canManage(p,M.config({})),false);
+    assert.equal(M.canManage(p,cfg),true); assert.equal(M.canManage(p,M.config({managementEnabled:false})),false);
     for (const extra of [{ownedByUser:false},{containerName:'web'},{pid:null},{startTicks:null}])
         assert.equal(M.canManage(M.viewRow({...port(),ownedByUser:true,startTicks:'123',...extra},'port'),cfg),false);
-    assert.deepEqual(clone(M.availableActions(M.viewRow(project(),'project'),cfg,{}).map(a=>a.key)),['t','e','f','c','a']);
+    assert.deepEqual(clone(M.availableActions(M.viewRow(project(),'project'),cfg,{}).map(a=>a.key)),['t','e','f','a']);
     assert.equal(M.availableActions(c,cfg,{}).filter(a=>a.id==='logs').length,0);
 });
 
@@ -576,7 +577,7 @@ test('Docker groups Compose members, matches member filters and gates bulk actio
     assert.deepEqual(clone(M.composeMembers(state, 'shop', cfg).map(row => row.title)), ['frontend', 'web']);
     assert.deepEqual(clone(M.availableActions(group, cfg, state).map(({key, confirm}) => [key, confirm])),
         [['u', false], ['x', true], ['R', true]]);
-    assert.deepEqual(clone(M.availableActions(group, M.config({}), state)), []);
+    assert.deepEqual(clone(M.availableActions(group, M.config({managementEnabled:false}), state)), []);
     assert.deepEqual(clone(M.actionArgs('compose-restart', group, cfg)), ['docker-compose-restart', '--project=shop', '--container-id=' + cid, '--container-id=' + 'b'.repeat(64)]);
     assert.match(M.confirmText('compose-restart', group), /shop/);
 });
@@ -700,7 +701,7 @@ test('published ports in Ports and DBs manage the first container and never stop
         assert.equal(row.kind, 'port');
         assert.deepEqual(clone(M.availableActions(row, cfg, state).map(a => [a.id, a.key, a.confirm])),
             [['stop', 'x', true], ['restart', 'R', true]]);
-        assert.deepEqual(clone(M.availableActions(row, M.config({}), state)), []);
+        assert.deepEqual(clone(M.availableActions(row, M.config({managementEnabled:false}), state)), []);
         assert.deepEqual(clone(M.availableActions(row, M.config({managementEnabled:true, dockerEnabled:false}), state)), []);
         for (const action of ['stop', 'restart'])
             assert.deepEqual(clone(M.actionArgs(action, row, cfg)), ['docker-' + action, '--container-id=' + cid]);
@@ -733,4 +734,16 @@ test('database containers and local database processes retain their own manageme
     const manageable = details.find(view => view.id === owned.id);
     assert.deepEqual(clone(M.availableActions(manageable, cfg, state).map(a => a.id)), ['terminate']);
     assert.equal(M.isSystemDatabase(manageable), false);
+});
+
+test('action buttons carry plain labels and projects offer no copy button', () => {
+    const cfg = M.config({projectRoots:'/work'});
+    const rows = [M.viewRow(project(),'project'), M.viewRow(container(),'container'),
+        M.viewRow({...container(),state:'exited'},'container'), M.viewRow({...port(),ownedByUser:true,startTicks:'1'},'port')];
+    for (const row of rows) for (const action of M.availableActions(row,cfg,{})) {
+        assert.doesNotMatch(action.label, /[()]/, action.label);
+        assert.notEqual(action.id, 'copy');
+    }
+    assert.deepEqual(clone(M.availableActions(M.viewRow(project(),'project'),cfg,{}).map(a=>a.id)),['terminal','editor','files','ai']);
+    assert.ok(M.availableActions(M.viewRow(container(),'container'),M.config({}),{}).some(a=>a.id==='stop'), 'management is on by default');
 });

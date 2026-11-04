@@ -170,10 +170,6 @@ Ui.Panel {
         row = row || (view === "list" ? visibleRows[cursor] : selectedRow);
         if (!row || operating || confirming)
             return;
-        if (action.id === "copy") {
-            hostWidget.copyText(row.copyText);
-            return;
-        }
         if (action.id === "ai") {
             toolProject = row.projectPath;
             selectTab("Tools");

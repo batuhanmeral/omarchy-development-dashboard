@@ -152,15 +152,22 @@ Column {
         color: root.panel.dim
     }
 
+    // One row: logs first, then browser shortcuts, then the actions this row allows.
     Flow {
         width: parent.width
         visible: root.panel.view === "detail"
         spacing: root.panel.gaps.md
         Ui.Button {
+            objectName: "detailViewLogs"
+            visible: !!root.panel.selectedRow.containerId && root.panel.cfg.dockerEnabled
+            text: root.strings.t("detail.viewLogs")
+            bordered: true
+            foreground: root.panel.foreground
+            onClicked: root.panel.showLogs()
+        }
+        Ui.Button {
             visible: !!root.panel.selectedRow.url
             text: root.strings.t("detail.openBrowser")
-            // nf-md-open_in_new
-            iconText: "\u{f03cc}"
             bordered: true
             selected: true
             foreground: root.panel.foreground
@@ -180,36 +187,12 @@ Column {
             foreground: root.panel.foreground
             onClicked: root.panel.openCurrent("https")
         }
-        Ui.Button {
-            // Projects copy their path through their own action button.
-            visible: !!root.panel.selectedRow.copyText && root.panel.selectedRow.kind !== "project"
-            text: root.panel.selectedRow.url ? root.strings.t("detail.copyUrl") : root.panel.selectedRow.kind === "port" ? root.strings.t("detail.copyAddress") : root.strings.t("detail.copyName")
-            iconText: "\u{f018f}"
-            bordered: true
-            foreground: root.panel.foreground
-            onClicked: root.panel.copyCurrent()
-        }
-        Ui.Button {
-            visible: !!root.panel.selectedRow.containerId && root.panel.cfg.dockerEnabled
-            text: root.strings.t("detail.viewLogs")
-            // nf-md-text_box_outline
-            iconText: "\u{f09ed}"
-            bordered: true
-            foreground: root.panel.foreground
-            onClicked: root.panel.showLogs()
-        }
-    }
-
-    Flow {
-        width: parent.width
-        visible: root.panel.view === "detail"
-        spacing: root.panel.gaps.md
         Repeater {
             model: Model.availableActions(root.panel.selectedRow, root.panel.cfg, root.panel.inventory, root.strings)
             Ui.Button {
                 required property var modelData
                 objectName: "detailAction-" + modelData.id
-                text: modelData.label + (modelData.key ? " (" + modelData.key + ")" : "")
+                text: modelData.label
                 bordered: true
                 foreground: modelData.destructive ? root.panel.urgent : root.panel.foreground
                 enabled: !root.panel.operating
@@ -371,7 +354,6 @@ Column {
         }
         Ui.Button {
             text: root.strings.t("logs.reload")
-            iconText: "\u{f0450}"
             bordered: true
             foreground: root.panel.foreground
             onClicked: root.panel.showLogs()
