@@ -20,7 +20,7 @@ default; turn **Management actions** off in settings for a strictly read-only pa
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/batuhanmeral/omarchy-development-dashboard --enable
+omarchy plugin add https://github.com/batuhanmeral/omarchy-development-dashboard.git --enable
 ```
 
 Omarchy clones the repository into
@@ -170,10 +170,6 @@ make fix     # apply Ruff and qmlformat formatting
 
 To try a change in the running shell, copy the working tree over the installed plugin
 directory and run `omarchy restart shell`.
-
-Detailed design, security analysis, migration notes, manual acceptance scenarios and
-marketplace notes are kept in `.docs/`. They are written in Turkish and not tracked in
-Git.
 
 ## License
 
