@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -24,11 +25,24 @@ class DashboardContracts(unittest.TestCase):
         self.assertEqual(manifest["name"], "Development Dashboard")
         self.assertEqual(manifest["barWidget"]["displayName"], manifest["name"])
         self.assertEqual(manifest["version"], "2.0.0")
-        self.assertTrue(
-            {"dashboard", "projects", "devports"} <= set(manifest["barWidget"]["aliases"])
+        self.assertEqual(
+            set(manifest["barWidget"]["aliases"]), {"dashboard", "projects", "ports", "docker"}
         )
         self.assertEqual(package["name"], "omarchy-development-dashboard")
         self.assertEqual(package["version"], "2.0.0")
+
+    def test_retired_collection_scope_is_rejected(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "backend/collector.py"), "legacy"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["data"], {})
+        self.assertEqual(payload["errors"], ["invalid arguments"])
 
     def test_runner_captures_bounded_stderr_and_counts_it_against_limit(self):
         with self.assertRaises(c.CollectionError) as caught:

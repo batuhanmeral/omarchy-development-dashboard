@@ -1,7 +1,6 @@
 .pragma library
 
 var pluginId = "io.github.batuhanmeral.development-dashboard";
-var legacyPluginId = "io.github.batuhanmeral.devports";
 var displayName = "Development Dashboard";
 var tabNames = ["Localhost", "Docker", "Images", "Databases", "Projects", "Tools"];
 var terminals = ["default", "alacritty", "foot", "ghostty", "kitty"];
@@ -163,14 +162,6 @@ function validateSettings(raw, strings) {
     return validationMessages(validationIssues(raw), strings);
 }
 
-function legacySettings(raw) {
-    raw = plain(raw) ? raw : {};
-    var safe = {};
-    var types = {refreshInterval:"number", dockerEnabled:"boolean", exposure:"string", hiddenPorts:"string", visibleTabs:"string", sortBy:"string", compact:"boolean", sqliteFiles:"string"};
-    Object.keys(types).forEach(function (key) { if (typeof raw[key] === types[key]) safe[key] = raw[key]; });
-    return config(safe);
-}
-
 function validIpv4(address) {
     return /^\d{1,3}(\.\d{1,3}){3}$/.test(address)
         && address.split(".").every(function (n) { return Number(n) <= 255; });
@@ -215,11 +206,8 @@ function decode(raw, expected) {
     }
     var sections = ["ports", "containers", "images", "volumes", "sqlite", "projects", "tools"];
     var allowed = {ports:["ports", "sqlite"], docker:["containers", "images", "volumes", "dockerStatus"],
-        assets:["containers", "images", "volumes", "dockerStatus"], projects:["projects", "skipped"], tools:["tools"], legacy:["legacy"]}[expected];
+        assets:["containers", "images", "volumes", "dockerStatus"], projects:["projects", "skipped"], tools:["tools"]}[expected];
     if (!allowed) throw new Error("Unknown inventory scope.");
-    if (expected === "legacy" && (!plain(result.data.legacy) || typeof result.data.legacy.found !== "boolean"
-            || typeof result.data.legacy.installed !== "boolean" || (result.data.legacy.found && !plain(result.data.legacy.settings))))
-        throw new Error("Invalid legacy settings.");
     if (result.data.skipped !== undefined && (!Number.isInteger(result.data.skipped) || result.data.skipped < 0)) throw new Error("Invalid skipped count.");
     Object.keys(result.data).forEach(function (key) {
         if (allowed.indexOf(key) < 0) throw new Error("Unexpected inventory section.");
@@ -257,7 +245,7 @@ function decode(raw, expected) {
 function merge(current, data) {
     var next = {};
     Object.keys(current).forEach(function (key) { next[key] = current[key]; });
-    ["ports", "containers", "images", "volumes", "sqlite", "dockerStatus", "projects", "tools", "legacy", "skipped"].forEach(function (key) {
+    ["ports", "containers", "images", "volumes", "sqlite", "dockerStatus", "projects", "tools", "skipped"].forEach(function (key) {
         if (data[key] !== undefined && JSON.stringify(data[key]) !== JSON.stringify(current[key]))
             next[key] = data[key];
     });
@@ -767,7 +755,6 @@ function nextScope(now, opened, cfg, last, busy) {
     if (opened) {
         if (lines(cfg.projectRoots).length) scopes.push(["projects", 60000]);
         scopes.push(["tools", 300000]);
-        if (last.legacy === undefined) scopes.push(["legacy", 3600000]);
     }
     var selected = "";
     var oldest = Infinity;

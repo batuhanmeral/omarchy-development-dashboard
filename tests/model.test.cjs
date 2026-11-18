@@ -104,7 +104,7 @@ test('poll scheduler never overlaps, slows down closed panels and defers invento
     assert.equal(M.nextScope(10000, true, cfg, {ports:10000}, false), 'docker');
     assert.equal(M.nextScope(10000, true, cfg, {ports:10000,docker:10000}, false), 'assets');
     assert.equal(M.nextScope(10000, false, cfg, {ports:5000,docker:5000}, false), '');
-    assert.equal(M.nextScope(10000, true, M.config({dockerEnabled:false}), {ports:10000,tools:10000,legacy:10000}, false), '');
+    assert.equal(M.nextScope(10000, true, M.config({dockerEnabled:false}), {ports:10000,tools:10000}, false), '');
 });
 
 test('database view includes stopped evidence and only configured SQLite files', () => {
@@ -157,7 +157,7 @@ test('slow port queries cannot starve never-queried Docker scopes', () => {
 
 test('overdue scopes keep making progress after their first query', () => {
     const cfg = M.config({refreshInterval:2});
-    const last = {ports:1000, docker:2000, assets:3000, tools:70000, legacy:70000};
+    const last = {ports:1000, docker:2000, assets:3000, tools:70000};
     const observed = [];
     for (let now = 70000; now <= 160000; now += 30000) {
         const scope = M.nextScope(now, true, cfg, last, false);
@@ -166,7 +166,7 @@ test('overdue scopes keep making progress after their first query', () => {
     }
     assert.deepEqual(observed, ['ports', 'docker', 'assets', 'ports']);
     assert.equal(M.nextScope(70000, false, cfg, {ports:70000,docker:70000}, false), '');
-    assert.equal(M.nextScope(70000, true, M.config({dockerEnabled:false}), {ports:70000,tools:70000,legacy:70000}, false), '');
+    assert.equal(M.nextScope(70000, true, M.config({dockerEnabled:false}), {ports:70000,tools:70000}, false), '');
 });
 
 test('zoned IPv4 listeners such as systemd-resolved do not reject the whole response', () => {
@@ -331,7 +331,6 @@ const envelope = (kind, data, extra = {}) => JSON.stringify({schemaVersion:1, ki
 
 test('dashboard identity, fixed tab keys and versioned visibility migration', () => {
     assert.equal(M.pluginId, 'io.github.batuhanmeral.development-dashboard');
-    assert.equal(M.legacyPluginId, 'io.github.batuhanmeral.devports');
     assert.equal(M.displayName, 'Development Dashboard');
     assert.deepEqual(clone(M.config({visibleTabs:'Localhost,Docker'}).tabs), ['Localhost','Docker','Projects','Tools']);
     assert.deepEqual(clone(M.config({settingsVersion:2,visibleTabs:'Docker,Tools'}).tabs), ['Docker','Tools']);
@@ -354,15 +353,11 @@ test('dashboard settings validate roots, bounds, editor and custom grammar', () 
     assert.equal(M.parseCustomTools('# ignored\nAider | aider | --token $(id) {path}')[0].args.join(' '), '--token $(id) {path}');
     for (const line of ['Name | ../exec','Name | /a/../exec', 'Name | $(id)', 'Name | exe | '+Array(17).fill('a').join(' '), 'Name | exe | a\0b','Name | exe | a | b'])
         assert.throws(()=>M.parseCustomTools(line),line);
-    const old=M.legacySettings({refreshInterval:9, compact:false, evil:'x',managementEnabled:true});
-    assert.equal(old.refreshInterval,9); assert.equal(old.compact,false); assert.equal(old.managementEnabled,true); assert.equal(old.evil,undefined);
-    assert.equal(M.legacySettings({refreshInterval:'9'}).refreshInterval,5);
 });
 
 test('decode isolates new scopes and rejects forged project and tool identities', () => {
     assert.equal(M.decode(envelope('projects',{projects:[project()],skipped:2}), 'projects').data.skipped,2);
     assert.equal(M.decode(envelope('tools',{tools:[tool()]}),'tools').data.tools.length,1);
-    assert.equal(M.decode(envelope('legacy',{legacy:{found:true,installed:false,settings:{compact:false}}}),'legacy').data.legacy.found,true);
     for (const p of [project('relative'),project('/a',{id:'project:/b'}), project('/a\nb')])
         assert.throws(()=>M.decode(envelope('projects',{projects:[p]}),'projects'));
     assert.throws(()=>M.decode(envelope('tools',{tools:[tool('$(id)')]}),'tools'));
@@ -371,7 +366,7 @@ test('decode isolates new scopes and rejects forged project and tool identities'
     assert.throws(()=>M.decode(envelope('projects',{projects:[project(),project()]}),'projects'));
     assert.equal(M.decodeAction(envelope('action',{state:'running'},{action:'docker-start'})).action,'docker-start');
     for (const raw of [envelope('ports',{}), envelope('action',[],{action:'x'}), envelope('action',{}, {action:2})]) assert.throws(()=>M.decodeAction(raw));
-    const next=M.merge({}, {projects:[project()],tools:[tool()],legacy:{found:false},skipped:1});
+    const next=M.merge({}, {projects:[project()],tools:[tool()],skipped:1});
     assert.equal(next.projects.length,1); assert.equal(next.tools.length,1); assert.equal(next.skipped,1);
 });
 
@@ -447,15 +442,14 @@ test('confirmation strings preserve names as plain data and explain SIGTERM', ()
     assert.equal(M.confirmText('stop',M.viewRow({...container(),name:'<img src=x>'},'container')),'Stop container “<img src=x>”?');
 });
 
-test('open dashboard schedules new scopes and legacy is only collected once', () => {
+test('open dashboard stops scheduling after all supported scopes are fresh', () => {
     const cfg=M.config({projectRoots:'/work'});
     const last={ports:10000,docker:10000,assets:10000};
     assert.equal(M.nextScope(10000,true,cfg,last,false),'projects');last.projects=10000;
     assert.equal(M.nextScope(10000,true,cfg,last,false),'tools');last.tools=10000;
-    assert.equal(M.nextScope(10000,true,cfg,last,false),'legacy');last.legacy=10000;
     assert.equal(M.nextScope(10000,true,cfg,last,false),'');
     assert.equal(M.nextScope(10000,false,cfg,{},false),'ports');
-    assert.equal(M.nextScope(4000000,true,M.config({dockerEnabled:false}),{ports:4000000,tools:4000000,legacy:1},false),'');
+    assert.equal(M.nextScope(4000000,true,M.config({dockerEnabled:false}),{ports:4000000,tools:4000000},false),'');
 });
 
 test('project paths reject invalid UTF-16 and accept the longest contract path', () => {

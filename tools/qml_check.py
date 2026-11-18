@@ -29,7 +29,7 @@ def main() -> int:
         if formatted != path.read_text():
             print(f"QML formatting differs: {path.relative_to(ROOT)}; run make fix")
             return 1
-    with tempfile.TemporaryDirectory(prefix="devports-qml-") as directory:
+    with tempfile.TemporaryDirectory(prefix="development-dashboard-qml-") as directory:
         imports = Path(directory)
         # `qs` is a synthetic root alias in the host. qmllint needs a filesystem mapping.
         (imports / "qs").symlink_to(shell, target_is_directory=True)

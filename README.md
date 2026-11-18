@@ -14,9 +14,6 @@ default; turn **Management actions** off in settings for a strictly read-only pa
 
 ![Panel preview](preview.png)
 
-> This plugin was previously published as **Development Ports**
-> (`io.github.batuhanmeral.devports`). See [Migrating from Development Ports](#migrating-from-development-ports).
-
 ## Install
 
 ```bash
@@ -36,6 +33,9 @@ Remove: `omarchy plugin remove io.github.batuhanmeral.development-dashboard`
 
 Removing the plugin deletes only its own folder. Its settings entry in
 `~/.config/omarchy/shell.json` is left in place, as with any Omarchy widget.
+
+To toggle the panel from a custom key binding, use
+`omarchy-shell io.github.batuhanmeral.development-dashboard toggle`.
 
 ### Requirements
 
@@ -61,8 +61,6 @@ No Python or JavaScript packages are installed.
 | `4` | DBs | Databases found by process or image name, plus SQLite files you list |
 | `5` | Projects | Git repositories inside the folders you register: branch, ahead/behind, changes, related services |
 | `6` | AI | Detected AI coding CLIs; launch one in a terminal inside a selected project |
-
-Keys `1`–`4` work as they did in Development Ports.
 
 ## Keyboard
 
@@ -97,7 +95,11 @@ when you press **Save**.
 | Docker | on | Read Docker containers, images and volumes |
 | Management actions | on | Container start/stop/restart and stopping your own processes; turn off for read-only |
 | Refresh interval | 5 s | While the panel is open; 2–120 s |
-| Show ports / hidden ports / sort / compact rows / tabs | | As in Development Ports |
+| Show ports | all | Filter by exposure |
+| Hidden ports | empty | Exclude selected port numbers |
+| Sort | port | Sort by port, name or state |
+| Compact rows | on | Use denser list rows |
+| Visible tabs | all | Choose which sections appear in the panel |
 | SQLite files | empty | Absolute paths; contents are never read |
 | Project folders | empty | Absolute paths, one per line, at most 16. Nothing is scanned until you add one |
 | Scan depth | 3 | 1–4 folder levels below each project folder |
@@ -141,25 +143,6 @@ when you press **Save**.
   key-like arguments masked. Masking is best effort, so treat the details view as
   sensitive.
 
-## Migrating from Development Ports
-
-The plugin id changed from `io.github.batuhanmeral.devports` to
-`io.github.batuhanmeral.development-dashboard`. Omarchy identifies a plugin by the id in its
-manifest, so:
-
-1. Install the new plugin with the command under [Install](#install).
-2. Open its settings (`s`) and choose **Import settings from Development Ports**. This
-   only fills the form from the old widget's entry; review it and press **Save**. The old
-   entry is not modified.
-3. Remove the old plugin: `omarchy plugin remove io.github.batuhanmeral.devports`.
-
-If you ran `omarchy plugin update io.github.batuhanmeral.devports` after this change, the
-widget disappears from the bar because the bar still refers to the old id. Run
-`omarchy plugin enable io.github.batuhanmeral.development-dashboard` to bring it back, or
-reinstall as above so later `update`/`remove` commands accept the new id. IPC targets
-change too: use `omarchy-shell io.github.batuhanmeral.development-dashboard toggle` in
-custom key bindings.
-
 ## Development
 
 ```bash
@@ -170,6 +153,8 @@ make fix     # apply Ruff and qmlformat formatting
 
 To try a change in the running shell, copy the working tree over the installed plugin
 directory and run `omarchy restart shell`.
+
+See [the local `.docs/` directory](.docs/) for more development notes in Turkish.
 
 ## License
 

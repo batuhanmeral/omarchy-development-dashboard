@@ -21,10 +21,8 @@
     "aliases": [
       "ports",
       "docker",
-      "dev-ports",
       "dashboard",
-      "projects",
-      "devports"
+      "projects"
     ]
   }
 }

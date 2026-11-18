@@ -86,7 +86,7 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(c.CollectionError, "limit"):
             c.Runner(max_bytes=100).run([sys.executable, "-c", 'print("a" * 1000)'])
         with self.assertRaisesRegex(c.CollectionError, "unavailable"):
-            c.Runner().run(["/nonexistent/devports-test-command"])
+            c.Runner().run(["/nonexistent/dashboard-test-command"])
         with self.assertRaisesRegex(c.CollectionError, "budget"):
             c.Runner(budget=0).run([sys.executable, "-c", "print(1)"])
         self.assertEqual(c.Runner().run([sys.executable, "-c", 'print("ok")']).strip(), "ok")

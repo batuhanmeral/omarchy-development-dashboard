@@ -8,7 +8,7 @@ import "../../Model.js" as Model
 // kit (tests/qml/imports). Collector runs are driven by hand through the Process stand-in.
 TestCase {
     id: suite
-    name: "DevelopmentPortsWidget"
+    name: "DevelopmentDashboardWidget"
     width: 520
     height: 720
     when: windowShown
@@ -678,8 +678,7 @@ TestCase {
             ports: now,
             docker: now,
             assets: now,
-            tools: now,
-            legacy: now
+            tools: now
         };
         if (p.widget.job) {
             collector.finishStream(reply(p.widget.job.scope, {}));
@@ -748,24 +747,13 @@ TestCase {
         keyClick(Qt.Key_1);
         compare(p.panel.tab, "Localhost");
     }
-    function test_importIsDraftUntilSave() {
+    function test_settingsAreDraftUntilSave() {
         const p = openPanel();
         fakeBar.saved = [];
-        p.widget.inventory = {
-            legacy: {
-                found: true,
-                installed: true,
-                settings: {
-                    refreshInterval: 19,
-                    hiddenPorts: "80"
-                }
-            }
-        };
         p.panel.toggleSettings();
         const form = findChild(p.panel, "settings");
-        form.importLegacy();
+        findChild(form, "hiddenPorts").text = "80";
         compare(fakeBar.saved.length, 0);
-        compare(form.intervalField.value, 19);
         form.submit();
         compare(fakeBar.saved.length, 1);
         compare(fakeBar.saved[0].settingsVersion, 2);
@@ -1028,7 +1016,6 @@ TestCase {
         p.widget.lastPoll = {
             ports: Date.now(),
             tools: Date.now(),
-            legacy: Date.now(),
             projects: Date.now()
         };
         settle(p.widget);
@@ -1087,50 +1074,6 @@ TestCase {
         keyClick(Qt.Key_Escape);
         verify(!p.panel.confirming);
         verify(p.keys.activeFocus);
-    }
-    function test_staleLegacyResultIsRetriedAfterCollectionSettingsChange() {
-        const t = createWidget();
-        t.worker.finishStream(portsReply([]));
-        t.worker.exit(0);
-        settle(t.widget);
-        t.widget.start("legacy", null);
-        t.widget.settings = {
-            dockerEnabled: false,
-            sqliteFiles: "/work/app.db"
-        };
-        t.worker.finishStream(reply("legacy", {
-            legacy: {
-                found: true,
-                installed: false,
-                settings: {
-                    refreshInterval: 17
-                }
-            }
-        }));
-        t.worker.exit(0);
-        verify(!t.widget.legacyAttempted);
-        verify(t.widget.inventory.legacy === undefined);
-        // Settling the refreshed ports leaves all open-panel scopes fresh except legacy.
-        tryCompare(t.worker, "launches", 3);
-        t.worker.finishStream(portsReply([]));
-        t.worker.exit(0);
-        settle(t.widget);
-        t.widget.lastPoll = {
-            ports: Date.now(),
-            tools: Date.now()
-        };
-        t.widget.open();
-        tryVerify(function () {
-            return t.widget.job && t.widget.job.scope === "legacy";
-        });
-        t.worker.finishStream(reply("legacy", {
-            legacy: {
-                found: false,
-                installed: false
-            }
-        }));
-        t.worker.exit(0);
-        verify(t.widget.legacyAttempted);
     }
     function test_displaySettingsKeepRunningCollectorAndPollTimes() {
         const t = createWidget();

@@ -6,7 +6,7 @@ import "../../Model.js" as Model
 
 TestCase {
     id: suite
-    name: "DevelopmentPortsUI"
+    name: "DevelopmentDashboardUI"
     width: 480
     height: 600
     when: windowShown
@@ -215,22 +215,9 @@ TestCase {
         saved.clear();
     }
 
-    function test_dashboardSettingsAndLegacyDraft() {
+    function test_dashboardSettingsSave() {
         const form = createTemporaryObject(settingsComponent, suite);
         saved.target = form;
-        form.legacy = {
-            found: true,
-            installed: true,
-            settings: {
-                refreshInterval: 17,
-                compact: false,
-                hiddenPorts: "8080"
-            }
-        };
-        form.importLegacy();
-        compare(saved.count, 0);
-        compare(form.intervalField.value, 17);
-        verify(form.imported);
         findChild(form, "projectRoots").text = "/work";
         findChild(form, "customTools").text = "Aider | aider | --no-auto-commits";
         form.managementEnabled = true;
@@ -252,31 +239,5 @@ TestCase {
         };
         form.load();
         compare(form.tabs.join(","), "Docker,Projects,Tools");
-    }
-
-    function test_legacyImportPreservesDashboardOnlySettings() {
-        const form = createTemporaryObject(settingsComponent, suite);
-        form.values = {
-            projectRoots: "/work",
-            terminal: "kitty",
-            managementEnabled: true,
-            customTools: "Aider | aider"
-        };
-        form.legacy = {
-            found: true,
-            settings: {
-                refreshInterval: 13
-            }
-        };
-        form.importLegacy();
-        saved.target = form;
-        form.submit();
-        compare(saved.count, 1);
-        const value = saved.signalArguments[0][0];
-        compare(value.projectRoots, "/work");
-        compare(value.terminal, "kitty");
-        compare(value.favoriteProjects, undefined);
-        compare(value.managementEnabled, true);
-        saved.clear();
     }
 }

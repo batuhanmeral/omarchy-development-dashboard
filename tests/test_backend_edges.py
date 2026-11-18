@@ -12,7 +12,6 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import actions as a
 import collector as c
-import migration as m
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -170,19 +169,3 @@ class BackendEdges(unittest.TestCase):
                             launch.resolve_executable("example")
             finally:
                 os.chdir(previous)
-
-    def test_large_legacy_integer_remains_a_valid_number(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            path = root / "omarchy/shell.json"
-            path.parent.mkdir()
-            path.write_text(
-                json.dumps(
-                    dict(
-                        bar=dict(layout=dict(left=[dict(id=m.LEGACY_ID, refreshInterval=10**500)]))
-                    )
-                )
-            )
-            self.assertEqual(
-                m.legacy_settings(root, root)["legacy"]["settings"]["refreshInterval"], 10**500
-            )

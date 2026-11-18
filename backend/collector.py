@@ -682,10 +682,6 @@ def collect(
                 row["protocol"] = web_protocol(row["process"])
             data["ports"] = rows
             data["sqlite"] = sqlite_inventory(sqlite_files or [])
-        elif scope == "legacy":
-            from migration import legacy_settings
-
-            data.update(legacy_settings())
         elif scope == "tools":
             from launch import detect_tools
 
@@ -736,7 +732,6 @@ def main() -> int:
             "logs",
             "projects",
             "tools",
-            "legacy",
         ],
     )
     parser.add_argument("--no-docker", action="store_true")

@@ -26,7 +26,6 @@ Ui.BarWidget {
     property int generation: 0
     property bool refreshing: false
     property string actionName: ""
-    property bool legacyAttempted: false
     property var collectionSettings: null
     property var operation: ({
             op: "",
@@ -117,10 +116,7 @@ Ui.BarWidget {
             start("logs", queued);
             return;
         }
-        var schedule = legacyAttempted ? Object.assign({}, lastPoll, {
-            legacy: 1
-        }) : lastPoll;
-        var scope = Model.nextScope(Date.now(), opened, cfg, schedule, false);
+        var scope = Model.nextScope(Date.now(), opened, cfg, lastPoll, false);
         if (scope)
             start(scope, null);
         else
@@ -205,8 +201,6 @@ Ui.BarWidget {
         drain.stop();
         var outcome = Model.outcome(done.scope, done.raw, done.exitCode, done.timedOut);
         if (Model.current(done, generation, logState.generation)) {
-            if (done.scope === "legacy")
-                legacyAttempted = true;
             if (done.scope === "logs") {
                 if (outcome.result)
                     logState.accept(done.logToken, outcome.result);

@@ -632,11 +632,6 @@ Ui.Panel {
                                 load()
                             foreground: root.foreground
                             values: root.hostWidget ? root.hostWidget.settings : ({})
-                            legacy: root.inventory.legacy || ({})
-                            onCopyRequested: function (text) {
-                                if (root.hostWidget)
-                                    root.hostWidget.copyText(text);
-                            }
                             onSaveRequested: function (values) {
                                 if (root.hostWidget && root.hostWidget.saveSettings(values))
                                     root.back();

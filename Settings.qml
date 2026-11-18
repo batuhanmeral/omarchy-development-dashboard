@@ -13,8 +13,6 @@ Column {
     id: root
 
     property var values: ({})
-    property var legacy: ({})
-    property bool imported: false
     property bool managementEnabled: true
     property bool statusBadge: false
     property string terminal: "default"
@@ -37,7 +35,6 @@ Column {
     property var tabs: Model.tabNames
 
     signal saveRequested(var values)
-    signal copyRequested(string text)
     signal cancelRequested
 
     spacing: gaps.lg
@@ -47,8 +44,8 @@ Column {
         directory: Qt.resolvedUrl("i18n")
     }
 
-    function load(source) {
-        var cfg = Model.config(source === undefined ? values : source);
+    function load() {
+        var cfg = Model.config(values);
         intervalInput.value = cfg.refreshInterval;
         dockerEnabled = cfg.dockerEnabled;
         exposure = cfg.exposure;
@@ -64,20 +61,7 @@ Column {
         depthInput.value = cfg.projectDepth;
         editorInput.text = cfg.editor;
         toolsInput.text = cfg.customTools;
-        imported = false;
         validationIssues = [];
-    }
-
-    function importLegacy() {
-        if (!legacy.found)
-            return;
-        var normalized = Model.legacySettings(legacy.settings);
-        var importedValues = {};
-        ["refreshInterval", "dockerEnabled", "exposure", "hiddenPorts", "visibleTabs", "sortBy", "compact", "sqliteFiles"].forEach(function (key) {
-            importedValues[key] = normalized[key];
-        });
-        load(Object.assign({}, values, importedValues));
-        imported = true;
     }
 
     function toggleTab(name) {
@@ -139,40 +123,6 @@ Column {
             color: "transparent"
             border.color: root.dim
             radius: Style.cornerRadius
-        }
-    }
-
-    Column {
-        width: parent.width
-        spacing: root.gaps.md
-        visible: root.legacy.found === true || root.legacy.installed === true
-        FieldLabel {
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: root.imported ? strings.t("settings.reviewImport") : strings.t("settings.importAvailable")
-            visible: root.legacy.found === true
-        }
-        Ui.Button {
-            width: parent.width
-            objectName: "importLegacy"
-            visible: root.legacy.found === true
-            text: strings.t("settings.import")
-            bordered: true
-            foreground: root.foreground
-            onClicked: root.importLegacy()
-        }
-        FieldLabel {
-            width: parent.width
-            visible: root.legacy.installed === true
-            wrapMode: Text.WrapAnywhere
-            text: strings.t("settings.removeOld").arg("omarchy plugin remove " + Model.legacyPluginId)
-        }
-        Ui.Button {
-            visible: root.legacy.installed === true
-            text: strings.t("settings.copyRemove")
-            bordered: true
-            foreground: root.foreground
-            onClicked: root.copyRequested("omarchy plugin remove " + Model.legacyPluginId)
         }
     }
 
