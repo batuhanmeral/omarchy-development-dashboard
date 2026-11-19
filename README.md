@@ -157,8 +157,6 @@ make fix     # apply Ruff and qmlformat formatting
 To try a change in the running shell, copy the working tree over the installed plugin
 directory and run `omarchy restart shell`.
 
-See [the local `.docs/` directory](.docs/) for more development notes in Turkish.
-
 ## License
 
 [MIT](LICENSE)
