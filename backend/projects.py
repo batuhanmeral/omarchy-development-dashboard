@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ MAX_VISITED_DIRECTORIES = 20000
 SCAN_BUDGET = 8.0
 SCAN_STOPPED = "Project scan stopped early (limit reached); showing partial results."
 PRUNED = {"node_modules", "vendor", "target", "build", "dist", "venv", "__pycache__"}
+OBJECT_ID_LENGTHS = {"sha1": 40, "sha256": 64}
 
 ENV_PORT = re.compile(
     r"""^[^\S\n]*(?:export[^\S\n]+)?(?:PORT|(?:[A-Za-z_][A-Za-z0-9_]*)?_PORT)[^\S\n]*=[^\S\n]*"""
@@ -93,7 +95,13 @@ def has_git_marker(project: Path) -> bool:
     return stat.S_ISDIR(mode) or stat.S_ISREG(mode)
 
 
-def run_project_git(project: Path, runner: CommandRunner, args: list[str]) -> str:
+def run_project_git(
+    project: Path,
+    runner: CommandRunner,
+    args: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
     return runner.run(
         [
             "git",
@@ -113,11 +121,41 @@ def run_project_git(project: Path, runner: CommandRunner, args: list[str]) -> st
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_ALLOW_PROTOCOL": "",
             "GIT_CEILING_DIRECTORIES": str(project.parent),
+            **(env or {}),
         },
     )
 
 
-def check_project_git_config(project: Path, runner: CommandRunner) -> None:
+BOOLEAN_VALUES = {
+    "true": "true",
+    "yes": "true",
+    "on": "true",
+    "1": "true",
+    "false": "false",
+    "no": "false",
+    "off": "false",
+    "0": "false",
+    "": "false",
+}
+# Repository-local settings that change what status reports, copied into the private
+# Git directory after validation. Anything else in the repository config is never loaded.
+STATUS_SETTINGS: dict[str, dict[str, str] | None] = {
+    "core.filemode": BOOLEAN_VALUES,
+    "core.ignorecase": BOOLEAN_VALUES,
+    "core.symlinks": BOOLEAN_VALUES,
+    "core.trustctime": BOOLEAN_VALUES,
+    "core.precomposeunicode": BOOLEAN_VALUES,
+    "core.autocrlf": BOOLEAN_VALUES | {"input": "input"},
+    "core.eol": {"lf": "lf", "crlf": "crlf", "native": "native"},
+    "core.checkstat": {"default": "default", "minimal": "minimal"},
+    "core.excludesfile": None,
+}
+MAX_EXCLUDES = 1 << 20
+
+
+def project_git_settings(project: Path, runner: CommandRunner) -> dict[str, str]:
+    """Reject local filters and includes; return the validated local status settings."""
+    names = "|".join(re.escape(name[5:]) for name in STATUS_SETTINGS)
     try:
         configured = run_project_git(
             project,
@@ -126,30 +164,50 @@ def check_project_git_config(project: Path, runner: CommandRunner) -> None:
                 "config",
                 "--show-scope",
                 "--no-includes",
-                "--name-only",
+                "-z",
                 "--get-regexp",
-                r"^(filter|include|includeif)\.",
+                rf"^(filter|include|includeif)\.|^core\.({names})$",
             ],
         )
     except CommandFailed as exc:
         # git config exits 1 without stderr when no key matches.
         if exc.returncode != 1 or exc.stderr:
             raise
-        return
-    if any(line.partition("\t")[0] in ("local", "worktree") for line in configured.splitlines()):
-        raise CollectionError("Project uses local Git filters or includes.")
+        return {}
+    fields = configured.split("\0")
+    settings: dict[str, str] = {}
+    for scope, entry in zip(fields[0::2], fields[1::2], strict=False):
+        if scope not in ("local", "worktree"):
+            continue
+        key, separator, value = entry.partition("\n")
+        if key.startswith(("filter.", "include.", "includeif.")):
+            raise CollectionError("Project uses local Git filters or includes.")
+        allowed = STATUS_SETTINGS.get(key, {})
+        if allowed is None:
+            settings[key] = value
+            continue
+        normalized = allowed.get(value.lower() if separator else "true")
+        if normalized is None:
+            raise CollectionError("Project uses an unsupported Git status setting.")
+        settings[key] = normalized
+    return settings
 
 
-def read_regular_file(path: Path, limit: int = 4096) -> str | None:
+def read_regular_bytes(path: Path, limit: int) -> bytes | None:
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             return None
         data = os.read(fd, limit + 1)
-        return data.decode("utf-8", errors="strict") if len(data) <= limit else None
+        return data if len(data) <= limit else None
     finally:
         os.close(fd)
+
+
+def read_regular_file(path: Path, limit: int = 4096) -> str | None:
+    data = read_regular_bytes(path, limit)
+    return None if data is None else data.decode("utf-8", errors="strict")
 
 
 def expected_ports(project: Path) -> list[dict[str, int | str]]:
@@ -309,39 +367,179 @@ def discover(
     return projects, skipped
 
 
+def repository_paths(project: Path, runner: CommandRunner) -> tuple[Path, Path, Path, str]:
+    """Return the index, object directory, exclude file and object format of a repository."""
+    lines = run_project_git(
+        project,
+        runner,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+            "--git-path",
+            "objects",
+            "--git-path",
+            "info/exclude",
+            "--show-object-format",
+        ],
+    ).splitlines()
+    if (
+        len(lines) != 4
+        or lines[3] not in OBJECT_ID_LENGTHS
+        or not all(Path(line).is_absolute() for line in lines[:3])
+    ):
+        raise CollectionError("unexpected repository layout")
+    return Path(lines[0]), Path(lines[1]), Path(lines[2]), lines[3]
+
+
+def head_commit(project: Path, runner: CommandRunner, object_format: str) -> str | None:
+    try:
+        raw = run_project_git(
+            project, runner, ["rev-parse", "--quiet", "--verify", "HEAD^{commit}"]
+        )
+    except CommandFailed as exc:
+        # An unborn branch exits 1 without stderr.
+        if exc.returncode != 1 or exc.stderr:
+            raise
+        return None
+    oid = raw.strip()
+    if not re.fullmatch(f"[0-9a-f]{{{OBJECT_ID_LENGTHS[object_format]}}}", oid):
+        raise CollectionError("unexpected HEAD")
+    return oid
+
+
+def current_branch(project: Path, runner: CommandRunner) -> str | None:
+    """Return the checked-out branch, or None for a detached HEAD (also for reftable)."""
+    try:
+        raw = run_project_git(project, runner, ["symbolic-ref", "--quiet", "HEAD"])
+    except CommandFailed as exc:
+        if exc.returncode != 1 or exc.stderr:
+            raise
+        return None
+    ref = raw.strip()
+    if not ref.startswith("refs/heads/") or len(ref) == 11:
+        raise CollectionError("unexpected HEAD")
+    return ref[11:]
+
+
+def ahead_behind(project: Path, runner: CommandRunner) -> tuple[int, int]:
+    try:
+        raw = run_project_git(
+            project, runner, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}", "--"]
+        )
+    except CommandFailed:
+        return 0, 0  # Unborn branch or no upstream.
+    match = re.fullmatch(r"(\d+)\t(\d+)\n?", raw)
+    return (int(match[1]), int(match[2])) if match else (0, 0)
+
+
+def copy_patterns(source: Path, target: Path) -> None:
+    """Copy an exclude file byte for byte; a missing file is an empty one."""
+    try:
+        data = read_regular_bytes(source, MAX_EXCLUDES)
+    except FileNotFoundError:
+        data = b""
+    if data is None:
+        raise CollectionError("unsupported exclude file")
+    target.write_bytes(data)
+
+
+def excludes_path(project: Path, value: str) -> Path:
+    # Git resolves a relative core.excludesFile against the top of the work tree.
+    if value == "~" or value.startswith("~/"):
+        return Path.home() / value[2:]
+    path = Path(value)
+    if value.startswith(("~", "%(prefix)")) or not value:
+        raise CollectionError("unsupported exclude file")
+    return path if path.is_absolute() else project / path
+
+
+def config_value(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_private_git_dir(
+    gitdir: Path,
+    project: Path,
+    head: str | None,
+    object_format: str,
+    exclude: Path,
+    settings: dict[str, str],
+) -> None:
+    """Create a Git directory whose configuration and attributes only this process controls."""
+    for name in ("refs", "objects", "info"):
+        (gitdir / name).mkdir()
+    (gitdir / "HEAD").write_text(f"{head}\n" if head else "ref: refs/heads/main\n")
+    copy_patterns(exclude, gitdir / "info" / "exclude")
+    core = [
+        f"\trepositoryFormatVersion = {1 if object_format == 'sha256' else 0}",
+        "\tbare = false",
+    ]
+    for key, value in settings.items():
+        if key == "core.excludesfile":
+            copy_patterns(excludes_path(project, value), gitdir / "excludes")
+            value = str(gitdir / "excludes")
+        core.append(f"\t{key[5:]} = {config_value(value)}")
+    extensions = "[extensions]\n\tobjectFormat = sha256\n" if object_format == "sha256" else ""
+    (gitdir / "config").write_text(
+        "[core]\n" + "\n".join(core) + "\n" + extensions, encoding="utf-8"
+    )
+
+
+def private_temp_root() -> str | None:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    return runtime if os.path.isabs(runtime) and os.path.isdir(runtime) else None
+
+
 def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
     result = unknown_status(project)
     if not has_git_marker(project):
         return result
     try:
-        check_project_git_config(project, runner)
-        raw = run_project_git(
-            project,
-            runner,
-            [
-                "-c",
-                "core.untrackedCache=false",
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "-z",
-                "--untracked-files=normal",
-                "--ignore-submodules=all",
-            ],
-        )
+        # Rejects local filters and includes because status would be inaccurate without
+        # them. It is not the security boundary: the configuration can change afterwards.
+        settings = project_git_settings(project, runner)
+        index, objects, exclude, object_format = repository_paths(project, runner)
+        branch = current_branch(project, runner)
+        head = head_commit(project, runner, object_format)
+        if branch is None and head is None:
+            raise CollectionError("HEAD does not name a commit")
+        if head is not None and not index.is_file():
+            raise CollectionError("index unavailable")
+        ahead, behind = ahead_behind(project, runner) if branch is not None else (0, 0)
+        # Status reads only the index, objects and work tree of the repository. Its
+        # configuration and info/attributes come from a private directory, so filters,
+        # includes or hooks added to the repository at any time are never loaded.
+        with tempfile.TemporaryDirectory(
+            prefix="development-dashboard-git-", dir=private_temp_root()
+        ) as tmp:
+            gitdir = Path(tmp)
+            write_private_git_dir(gitdir, project, head, object_format, exclude, settings)
+            raw = run_project_git(
+                project,
+                runner,
+                [
+                    "-c",
+                    "core.untrackedCache=false",
+                    f"--git-dir={gitdir}",
+                    f"--work-tree={project}",
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                    "--untracked-files=normal",
+                    "--ignore-submodules=all",
+                ],
+                env={"GIT_INDEX_FILE": str(index), "GIT_OBJECT_DIRECTORY": str(objects)},
+            )
+        if branch is None and head is not None:
+            result.update(branch=head[:7], detached=True)
+        else:
+            result.update(branch=clean(branch or "", 256) or None, detached=False)
+        result.update(ahead=ahead, behind=behind)
         records = iter(raw.split("\0"))
         for record in records:
-            if record.startswith("# branch.head "):
-                branch = record[14:]
-                if branch == "(detached)":
-                    result["detached"] = True
-                else:
-                    result.update(branch=clean(branch, 256), detached=False)
-            elif record.startswith("# branch.ab "):
-                match = re.fullmatch(r"# branch.ab \+(\d+) -(\d+)", record)
-                if match:
-                    result.update(ahead=int(match[1]), behind=int(match[2]))
-            elif record.startswith(("1 ", "2 ")):
+            if record.startswith(("1 ", "2 ")):
                 result["changed"] += 1
                 if record.startswith("2 "):
                     next(records, None)  # Rename source is a second NUL-delimited pathname.
@@ -352,6 +550,6 @@ def git_status(project: Path, runner: CommandRunner) -> dict[str, Any]:
         result["gitState"] = (
             "dirty" if any(result[k] for k in ("changed", "untracked", "conflicts")) else "clean"
         )
-    except CollectionError:
-        pass
+    except (CollectionError, OSError, UnicodeError):
+        result = unknown_status(project)
     return result

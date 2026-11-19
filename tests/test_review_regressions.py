@@ -69,6 +69,59 @@ class ReviewRegressions(unittest.TestCase):
                 self.assertFalse(marker.exists(), "git status executed the repository's filter")
                 self.assertEqual(result["gitState"], "unknown")
 
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_git_status_ignores_filters_added_after_the_config_preflight(self):
+        for attributes in (".gitattributes", ".git/info/attributes"):
+            with self.subTest(attributes=attributes), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+
+                def git(*args, root=root):
+                    return subprocess.run(
+                        ["git", "-C", str(root), *args], check=True, capture_output=True
+                    )
+
+                git("init", "-q", "-b", "main")
+                tracked = root / "tracked.txt"
+                tracked.write_text("original")
+                git("add", "tracked.txt")
+                (root / attributes).write_text("tracked.txt filter=fixture\n")
+                marker = root / "filter-ran"
+                script = root / "filter.py"
+                script.write_text(
+                    "import pathlib,sys\n"
+                    f"pathlib.Path({str(marker)!r}).touch()\n"
+                    "sys.stdout.write(sys.stdin.read())\n"
+                )
+                tracked.write_text("modified")
+
+                class RacingRunner:
+                    """Changes the repository config right after the preflight finished."""
+
+                    def __init__(self, command):
+                        self.inner = c.Runner()
+                        self.command = command
+                        self.raced = False
+
+                    def run(self, argv, **kwargs):
+                        try:
+                            return self.inner.run(argv, **kwargs)
+                        finally:
+                            if "--get-regexp" in argv and not self.raced:
+                                self.raced = True
+                                git(
+                                    "config",
+                                    "--local",
+                                    "filter.fixture.clean",
+                                    self.command,
+                                )
+
+                runner = RacingRunner(f"{sys.executable} {script}")
+                result = projects.git_status(root, runner)
+                self.assertTrue(runner.raced, "the preflight did not run")
+                self.assertFalse(marker.exists(), "git status executed a filter added later")
+                self.assertEqual(result["gitState"], "dirty")
+                self.assertEqual(result["changed"], 1)
+
     def test_git_config_include_preflight_is_fail_closed(self):
         from unittest.mock import Mock
 
@@ -77,7 +130,7 @@ class ReviewRegressions(unittest.TestCase):
             (root / ".git").mkdir()
             for definition in ("filter.fixture.clean", "include.path", "includeif.gitdir:*/.path"):
                 runner = Mock()
-                runner.run.return_value = "local\t" + definition + "\n"
+                runner.run.return_value = "local\0" + definition + "\nvalue\0"
                 result = projects.git_status(root, runner)
                 self.assertEqual(result["gitState"], "unknown")
                 self.assertEqual(runner.run.call_count, 1)

@@ -95,6 +95,8 @@ class ProjectsTests(unittest.TestCase):
         self.assertEqual(self.p.head_branch(worktree), (None, False))
 
     def test_porcelain_v2_counts_and_rename_second_path(self):
+        root = self.root
+
         class Fake:
             calls = []
 
@@ -102,15 +104,23 @@ class ProjectsTests(unittest.TestCase):
                 self.calls.append((argv, kwargs))
                 if "config" in argv:
                     return ""
-                return (
-                    "# branch.oid abc\0# branch.head main\0# branch.ab +2 -3\0"
-                    + "1 M. x\0"
-                    + "2 R. x\0? old-name\0"
-                    + "? new-file\0u UU conflict\0"
-                )
+                if "--show-object-format" in argv:
+                    return (
+                        f"{root}/.git/index\n{root}/.git/objects\n{root}/.git/info/exclude\nsha1\n"
+                    )
+                if "--verify" in argv:
+                    return "a" * 40 + "\n"
+                if "symbolic-ref" in argv:
+                    return "refs/heads/main\n"
+                if "rev-list" in argv:
+                    return "2\t3\n"
+                gitdir = Path(next(a for a in argv if a.startswith("--git-dir="))[10:])
+                self.private = (gitdir / "HEAD").read_text(), (gitdir / "config").read_text()
+                return "1 M. x\0" + "2 R. x\0? old-name\0" + "? new-file\0u UU conflict\0"
 
         runner = Fake()
         self.repo(self.root)
+        (self.root / ".git/index").touch()
         result = self.p.git_status(self.root, runner)
         self.assertEqual(
             result,
@@ -125,7 +135,13 @@ class ProjectsTests(unittest.TestCase):
                 gitState="dirty",
             ),
         )
-        argv, kwargs = runner.calls[1]
+        self.assertEqual(len(runner.calls), 6)
+        self.assertEqual(runner.private[0], "a" * 40 + "\n")
+        self.assertNotIn("filter", runner.private[1])
+        self.assertNotIn("include", runner.private[1])
+        argv, kwargs = runner.calls[5]
+        gitdir = argv[10][10:]
+        self.assertFalse(Path(gitdir).exists(), "private Git directory was not removed")
         self.assertEqual(
             argv,
             [
@@ -139,9 +155,10 @@ class ProjectsTests(unittest.TestCase):
                 str(self.root),
                 "-c",
                 "core.untrackedCache=false",
+                f"--git-dir={gitdir}",
+                f"--work-tree={self.root}",
                 "status",
                 "--porcelain=v2",
-                "--branch",
                 "-z",
                 "--untracked-files=normal",
                 "--ignore-submodules=all",
@@ -150,6 +167,8 @@ class ProjectsTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 2)
         self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(kwargs["env"]["GIT_INDEX_FILE"], f"{self.root}/.git/index")
+        self.assertEqual(kwargs["env"]["GIT_OBJECT_DIRECTORY"], f"{self.root}/.git/objects")
         with patch.object(Fake, "run", side_effect=c.CollectionError("git timeout")):
             self.assertEqual(self.p.git_status(self.root, runner)["gitState"], "unknown")
 
@@ -207,6 +226,135 @@ class ProjectsTests(unittest.TestCase):
         self.assertEqual(row["branch"], "main")
         self.assertEqual(row["untracked"], 1)
         self.assertEqual(row["gitState"], "dirty")
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_real_git_status_keeps_upstream_staging_excludes_and_worktrees(self):
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        for object_format in ("sha1", "sha256"):
+            with self.subTest(object_format=object_format), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp) / "repo"
+
+                def git(*argv, cwd=repo):
+                    return subprocess.run(
+                        ["git", "-C", str(cwd), *argv], check=True, capture_output=True, text=True
+                    ).stdout.strip()
+
+                def commit(message, *parents, cwd=repo):
+                    tree = git("write-tree", cwd=cwd)
+                    flags = [item for parent in parents for item in ("-p", parent)]
+                    # Plumbing only: the user's global commit hooks never see this fixture.
+                    return git(*identity, "commit-tree", tree, *flags, "-m", message, cwd=cwd)
+
+                subprocess.run(
+                    ["git", "init", "-q", "-b", "main", f"--object-format={object_format}", repo],
+                    check=True,
+                )
+                (repo / "a.txt").write_text("one\n")
+                git("add", "a.txt")
+                base = commit("test: base")
+                (repo / "a.txt").write_text("two\n")
+                git("add", "a.txt")
+                local = commit("test: local", base)
+                git("update-ref", "refs/heads/main", local)
+                git("update-ref", "refs/remotes/origin/main", base)
+                git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+                git("config", "branch.main.remote", "origin")
+                git("config", "branch.main.merge", "refs/heads/main")
+                (repo / "staged.txt").write_text("new\n")
+                git("add", "staged.txt")
+                (repo / "ignored.log").write_text("x\n")
+                (repo / "visible.txt").write_text("x\n")
+                (repo / ".git/info/exclude").write_text("*.log\n")
+
+                result = self.p.git_status(repo, c.Runner())
+                self.assertEqual(
+                    {k: result[k] for k in ("branch", "ahead", "behind", "changed", "untracked")},
+                    dict(branch="main", ahead=1, behind=0, changed=1, untracked=1),
+                )
+                self.assertEqual(result["gitState"], "dirty")
+
+                linked = Path(tmp) / "linked"
+                git("worktree", "add", "-q", "-b", "side", str(linked), base)
+                (linked / "a.txt").write_text("changed in worktree\n")
+                result = self.p.git_status(linked, c.Runner())
+                self.assertEqual(
+                    {k: result[k] for k in ("branch", "changed", "untracked", "gitState")},
+                    dict(branch="side", changed=1, untracked=0, gitState="dirty"),
+                )
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_real_git_status_keeps_branch_and_local_status_settings(self):
+        repo = self.root / "repo"
+
+        def git(*argv):
+            return subprocess.run(
+                ["git", "-C", str(repo), *argv], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        subprocess.run(
+            ["git", "init", "-q", "-b", "trunk", "--ref-format=reftable", str(repo)], check=True
+        )
+        (repo / "run.sh").write_text("echo\n")
+        git("add", "run.sh")
+        tree = git("write-tree")
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        head = git(*identity, "commit-tree", tree, "-m", "test: base")
+        git("update-ref", "refs/heads/trunk", head)
+        git("config", "core.filemode", "false")
+        git("config", "core.excludesFile", ".git/local-excludes")
+        (repo / ".git/local-excludes").write_text("*.tmp\n")
+        (repo / "run.sh").chmod(0o755)
+        (repo / "scratch.tmp").write_text("x\n")
+        result = self.p.git_status(repo, c.Runner())
+        self.assertEqual(
+            {k: result[k] for k in ("branch", "detached", "changed", "untracked", "gitState")},
+            dict(branch="trunk", detached=False, changed=0, untracked=0, gitState="clean"),
+        )
+
+        git("checkout", "-q", "--detach")
+        result = self.p.git_status(repo, c.Runner())
+        self.assertEqual((result["branch"], result["detached"]), (head[:7], True))
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_real_git_status_is_unknown_without_index_or_with_broken_head(self):
+        repo = self.root / "repo"
+
+        def git(*argv):
+            return subprocess.run(
+                ["git", "-C", str(repo), *argv], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        (repo / "a.txt").write_text("a\n")
+        git("add", "a.txt")
+        tree = git("write-tree")
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        git("update-ref", "refs/heads/main", git(*identity, "commit-tree", tree, "-m", "test: a"))
+        (repo / ".git/index").unlink()
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "unknown")
+
+        git("read-tree", "HEAD")
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "clean")
+        (repo / ".git/HEAD").write_text("0" * 40 + "\n")
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "unknown")
+
+    @unittest.skipUnless(shutil.which("git"), "git unavailable")
+    def test_real_git_status_fails_closed_on_unsupported_settings_and_temp_errors(self):
+        repo = self.root / "repo"
+
+        def git(*argv):
+            subprocess.run(["git", "-C", str(repo), *argv], check=True, capture_output=True)
+
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "clean")
+        with patch.object(self.p.tempfile, "TemporaryDirectory", side_effect=OSError("full")):
+            self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "unknown")
+        (repo / ".git/info/exclude").write_bytes(b"#" * (self.p.MAX_EXCLUDES + 1))
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "unknown")
+        (repo / ".git/info/exclude").write_bytes(b"caf\xe9\n")
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "clean")
+        git("config", "core.eol", "bogus")
+        self.assertEqual(self.p.git_status(repo, c.Runner())["gitState"], "unknown")
 
     def test_expected_ports_only_exports_numbers_and_filenames(self):
         project = self.repo(self.root / "app")
@@ -279,11 +427,16 @@ class ProjectsTests(unittest.TestCase):
 
             def run(_, argv, **kwargs):
                 _.calls.append((argv, kwargs))
-                return ""
+                if "--show-object-format" in argv:
+                    return f"{project}/i\n{project}/o\n{project}/e\nsha256\n"
+                if "symbolic-ref" in argv:
+                    return "refs/heads/main\n"
+                return "b" * 64 if "--verify" in argv else ""
 
+        (project / "i").touch()
         runner = Fake()
-        self.p.git_status(project, runner)
-        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(self.p.git_status(project, runner)["gitState"], "clean")
+        self.assertEqual(len(runner.calls), 6)
         for argv, kwargs in runner.calls:
             self.assertIn("protocol.allow=never", argv)
             self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")

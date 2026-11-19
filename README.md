@@ -131,7 +131,10 @@ when you press **Save**.
 - **Projects.** Only folders you register are scanned, with a depth limit, without
   following symlinks, and skipping hidden and dependency folders. Project files are never
   modified or deleted. Git status runs with optional locks and fsmonitor disabled, and
-  is skipped for repositories whose own config defines filters or includes. Even so,
+  against a private Git directory, so it never loads the repository's own config
+  (only validated status settings such as `core.fileMode` are copied) or
+  `info/attributes`. Repositories whose config defines filters or includes are skipped
+  because their status would be inaccurate. Even so,
   `git status` is not safe on untrusted repositories, the same as in a shell prompt. Do
   not register folders that contain repositories you do not trust.
 - **AI tools** are detected, never installed, and start only when you launch one. The
